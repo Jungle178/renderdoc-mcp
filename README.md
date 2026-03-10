@@ -104,6 +104,8 @@ renderdoc_list_passes(
 )
 ```
 
+`sort_by="gpu_time"` uses replay-derived GPU timing. Treat it as a noisy hint for ranking, not a stable correctness baseline across runs.
+
 ```powershell
 renderdoc_get_pass_summary(capture_id="<capture_id>", pass_id="pass:3606-5458")
 ```
@@ -118,6 +120,8 @@ renderdoc_list_timing_events(
   sort_by="gpu_time"
 )
 ```
+
+`gpu_time_ms` comes from RenderDoc replay counters. The same `.rdc` can produce different values across runs or sessions, so timing is best used for hotspot guidance and within-run ordering.
 
 Navigate actions by parent event id:
 
@@ -274,6 +278,8 @@ The benchmark:
 - can optionally compare the current result against an older git ref such as `HEAD^`
 
 Scoring uses the interactive workflow only, excluding `open_capture` and `close_capture`. Higher is better. `composite_score` weights payload efficiency at `85%` and latency at `15%`.
+
+The workflow still relies on replay-derived GPU timing for worklist and timing-oriented ranking. Expect some run-to-run noise, and treat `compare-ref` deltas as directional signals rather than strict regression thresholds.
 
 Useful options:
 

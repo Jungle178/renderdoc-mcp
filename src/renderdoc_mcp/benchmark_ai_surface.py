@@ -926,7 +926,10 @@ def print_ref_comparison(comparison: dict[str, Any]) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     root = repo_root()
     parser = argparse.ArgumentParser(
-        description="Benchmark the AI-first RenderDoc MCP workflow and append a score to the local history file."
+        description=(
+            "Benchmark the AI-first RenderDoc MCP workflow and append a score to the local history file. "
+            "Timing-driven selections rely on replay-derived GPU timing and may vary across runs."
+        )
     )
     parser.add_argument(
         "--capture",
@@ -963,7 +966,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--compare-ref",
         default="",
-        help="Optional git ref to benchmark as a legacy baseline, for example `HEAD^`.",
+        help="Optional git ref to benchmark as a legacy baseline, for example `HEAD^`. Use deltas as directional signals because timing-driven selections are noisy.",
     )
     parser.add_argument(
         "--no-append",

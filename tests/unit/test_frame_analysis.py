@@ -249,3 +249,35 @@ def test_build_performance_hotspots_uses_nested_passes() -> None:
 
     assert hotspots["basis"] == "heuristic"
     assert hotspots["top_passes"][0]["name"] == "BasePass"
+
+
+def test_build_performance_hotspots_orders_synthetic_gpu_rows() -> None:
+    nodes = [
+        _action(
+            100,
+            "Frame",
+            ["push_marker"],
+            children=[
+                _action(110, "Shadow", ["push_marker"], children=[_action(111, "ShadowDraw", ["draw"])]),
+                _action(120, "BasePass", ["push_marker"], children=[_action(121, "BaseDraw", ["draw"])]),
+            ],
+        )
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    hotspots = frame_analysis.build_performance_hotspots(
+        analysis,
+        {
+            "timing_available": True,
+            "counter_name": "EventGPUDuration",
+            "rows": [
+                {"event_id": 121, "gpu_time_ms": 2.0},
+                {"event_id": 111, "gpu_time_ms": 1.0},
+            ],
+        },
+        limit=2,
+    )
+
+    assert hotspots["basis"] == "gpu_timing"
+    assert [item["name"] for item in hotspots["top_passes"]] == ["BasePass", "Shadow"]
+    assert [item["event_id"] for item in hotspots["top_events"]] == [121, 111]
