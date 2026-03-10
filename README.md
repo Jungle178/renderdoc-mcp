@@ -256,6 +256,43 @@ You can also disable the `UI.config` update for both manual installs and automat
 $env:RENDERDOC_INSTALL_ALWAYS_LOAD = "0"
 ```
 
+## Benchmark
+
+Run the fixed AI-first workflow benchmark against a real `.rdc` capture:
+
+```powershell
+uv run renderdoc-benchmark-ai-surface --capture "C:\captures\sample.rdc"
+```
+
+The benchmark:
+
+- opens the capture
+- runs the compact overview -> worklist -> pass -> event -> resource drilldown flow
+- measures response bytes, approximate token cost, and elapsed time
+- computes `payload_score`, `latency_score`, and `composite_score`
+- appends a JSONL record to `benchmarks/ai_surface_history.jsonl`
+- can optionally compare the current result against an older git ref such as `HEAD^`
+
+Scoring uses the interactive workflow only, excluding `open_capture` and `close_capture`. Higher is better. `composite_score` weights payload efficiency at `85%` and latency at `15%`.
+
+Useful options:
+
+```powershell
+uv run renderdoc-benchmark-ai-surface `
+  --capture "C:\captures\sample.rdc" `
+  --capture-label "sample-capture" `
+  --note "after registry/timing refactor"
+```
+
+To compare the current AI-first surface against the previous commit in one run:
+
+```powershell
+uv run renderdoc-benchmark-ai-surface `
+  --capture "C:\captures\sample.rdc" `
+  --capture-label "sample-capture" `
+  --compare-ref "HEAD^"
+```
+
 ## Run
 
 ```powershell
