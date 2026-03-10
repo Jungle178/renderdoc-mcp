@@ -10,6 +10,7 @@ from functools import lru_cache
 from typing import Callable, Iterator
 
 from renderdoc_mcp.bridge import QRenderDocBridge
+from renderdoc_mcp.uri import create_capture_id
 
 
 def _env_float(name: str, default: float) -> float:
@@ -22,8 +23,9 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-@dataclass
-class _CaptureSession:
+@dataclass(slots=True)
+class CaptureSession:
+    capture_id: str
     capture_path: str
     bridge: QRenderDocBridge
     last_used_monotonic: float
@@ -45,21 +47,39 @@ class CaptureSessionPool:
         self._bridge_factory = bridge_factory or QRenderDocBridge
         self._monotonic = monotonic or time.monotonic
         self._lock = threading.RLock()
-        self._sessions: dict[str, _CaptureSession] = {}
+        self._sessions: dict[str, CaptureSession] = {}
         atexit.register(self.close_all)
 
-    @contextmanager
-    def lease(self, capture_path: str) -> Iterator[QRenderDocBridge]:
-        bridge = self._acquire(capture_path)
-        try:
-            yield bridge
-        finally:
-            self.release(capture_path)
-
-    def release(self, capture_path: str) -> None:
+    def open(self, capture_path: str) -> CaptureSession:
         now = self._monotonic()
         with self._lock:
-            session = self._sessions.get(capture_path)
+            expired = self._pop_expired_locked(now)
+            session = CaptureSession(
+                capture_id=create_capture_id(),
+                capture_path=capture_path,
+                bridge=self._bridge_factory(),
+                last_used_monotonic=now,
+            )
+            self._sessions[session.capture_id] = session
+        self._close_sessions(expired)
+        return session
+
+    @contextmanager
+    def lease(self, capture_id: str) -> Iterator[CaptureSession]:
+        session = self._acquire(capture_id)
+        try:
+            yield session
+        finally:
+            self.release(capture_id)
+
+    def get(self, capture_id: str) -> CaptureSession | None:
+        with self._lock:
+            return self._sessions.get(capture_id)
+
+    def release(self, capture_id: str) -> None:
+        now = self._monotonic()
+        with self._lock:
+            session = self._sessions.get(capture_id)
             if session is not None:
                 if session.in_use_count > 0:
                     session.in_use_count -= 1
@@ -67,11 +87,17 @@ class CaptureSessionPool:
             expired = self._pop_expired_locked(now)
         self._close_sessions(expired)
 
+    def close(self, capture_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.pop(capture_id, None)
+        self._close_sessions([session] if session is not None else [])
+        return session is not None
+
     def evict_idle_sessions(self) -> list[str]:
         with self._lock:
             expired = self._pop_expired_locked(self._monotonic())
         self._close_sessions(expired)
-        return [session.capture_path for session in expired]
+        return [session.capture_id for session in expired]
 
     def session_count(self) -> int:
         with self._lock:
@@ -83,37 +109,30 @@ class CaptureSessionPool:
             self._sessions.clear()
         self._close_sessions(sessions)
 
-    def _acquire(self, capture_path: str) -> QRenderDocBridge:
+    def _acquire(self, capture_id: str) -> CaptureSession:
         now = self._monotonic()
         with self._lock:
             expired = self._pop_expired_locked(now)
-            session = self._sessions.get(capture_path)
+            session = self._sessions.get(capture_id)
             if session is None:
-                session = _CaptureSession(
-                    capture_path=capture_path,
-                    bridge=self._bridge_factory(),
-                    last_used_monotonic=now,
-                )
-                self._sessions[capture_path] = session
+                raise KeyError(capture_id)
             session.in_use_count += 1
             session.last_used_monotonic = now
-            bridge = session.bridge
         self._close_sessions(expired)
-        return bridge
+        return session
 
-    def _pop_expired_locked(self, now: float) -> list[_CaptureSession]:
+    def _pop_expired_locked(self, now: float) -> list[CaptureSession]:
         if self.idle_timeout_seconds <= 0:
             return []
 
-        expired_paths = [
-            capture_path
-            for capture_path, session in self._sessions.items()
+        expired_ids = [
+            capture_id
+            for capture_id, session in self._sessions.items()
             if session.in_use_count == 0 and (now - session.last_used_monotonic) > self.idle_timeout_seconds
         ]
-        expired = [self._sessions.pop(capture_path) for capture_path in expired_paths]
-        return expired
+        return [self._sessions.pop(capture_id) for capture_id in expired_ids]
 
-    def _close_sessions(self, sessions: list[_CaptureSession]) -> None:
+    def _close_sessions(self, sessions: list[CaptureSession]) -> None:
         for session in sessions:
             try:
                 session.bridge.close()

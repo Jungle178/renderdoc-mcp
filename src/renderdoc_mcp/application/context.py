@@ -5,88 +5,54 @@ import math
 from pathlib import Path
 from typing import Any
 
-from renderdoc_mcp.bridge import QRenderDocBridge
-from renderdoc_mcp.errors import CapturePathError, ReplayFailureError, RenderDocMCPError
+from renderdoc_mcp.errors import CapturePathError, InvalidCaptureIDError, ReplayFailureError
 from renderdoc_mcp.paths import ui_config_path
-from renderdoc_mcp.session_pool import CaptureSessionPool, get_capture_session_pool
-from renderdoc_mcp.uri import encode_capture_path
+from renderdoc_mcp.session_pool import CaptureSession, CaptureSessionPool, get_capture_session_pool
+from renderdoc_mcp.uri import normalize_capture_id
 
 NULL_LIKE_VALUES = {"", "null", "none", "undefined"}
 TRUE_LIKE_VALUES = {"1", "true", "yes", "on"}
 FALSE_LIKE_VALUES = {"0", "false", "no", "off"}
 
 
-class ServiceContext:
-    def __init__(
+class ApplicationContext:
+    def __init__(self, session_pool: CaptureSessionPool | None = None) -> None:
+        self._session_pool = session_pool or get_capture_session_pool()
+
+    def open_capture(self, capture_path: str) -> CaptureSession:
+        normalized_path = self.normalize_capture_path(capture_path)
+        return self._session_pool.open(normalized_path)
+
+    def close_capture(self, capture_id: str) -> bool:
+        normalized_id = self.normalize_required_capture_id(capture_id)
+        return self._session_pool.close(normalized_id)
+
+    def get_session(self, capture_id: str) -> CaptureSession:
+        normalized_id = self.normalize_required_capture_id(capture_id)
+        session = self._session_pool.get(normalized_id)
+        if session is None:
+            raise InvalidCaptureIDError(normalized_id)
+        return session
+
+    def capture_tool(
         self,
-        bridge: QRenderDocBridge | None = None,
-        session_pool: CaptureSessionPool | None = None,
-    ) -> None:
-        if bridge is not None and session_pool is not None:
-            raise ValueError("bridge and session_pool are mutually exclusive")
-
-        self.bridge = bridge
-        self._session_pool = None if bridge is not None else (session_pool or get_capture_session_pool())
-
-    def capture_tool(self, normalized_path: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        if self.bridge is not None:
-            self.bridge.ensure_capture_loaded(normalized_path)
-            return self.bridge.call(method, params or {})
-
-        assert self._session_pool is not None
-        with self._session_pool.lease(normalized_path) as bridge:
-            bridge.ensure_capture_loaded(normalized_path)
-            return bridge.call(method, params or {})
-
-    def run_tool(self, capture_path: str, headline: str, callback: Any) -> dict[str, Any]:
+        capture_id: str,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> tuple[CaptureSession, dict[str, Any]]:
+        normalized_id = self.normalize_required_capture_id(capture_id)
         try:
-            normalized = self.normalize_capture_path(capture_path)
-            result = callback(normalized)
-            return self.success_response(normalized, result, headline)
-        except RenderDocMCPError as exc:
-            return self.error_response(capture_path, exc, headline)
-        except Exception as exc:  # pragma: no cover
-            return self.error_response(
-                capture_path,
-                ReplayFailureError(
-                    "Unexpected server error while talking to RenderDoc.",
-                    {"exception_type": type(exc).__name__, "message": str(exc)},
-                ),
-                headline,
-            )
+            with self._session_pool.lease(normalized_id) as session:
+                session.bridge.ensure_capture_loaded(session.capture_path)
+                return session, session.bridge.call(method, params or {})
+        except KeyError as exc:
+            raise InvalidCaptureIDError(normalized_id) from exc
 
-    def success_response(self, capture_path: str, result: dict[str, Any], headline: str) -> dict[str, Any]:
-        warnings: list[str] = []
-        if result.get("truncated"):
-            returned_count = result.get("returned_count")
-            limit = result.get("limit")
-            warnings.append(
-                "Result was truncated to {} action nodes{}.".format(
-                    limit,
-                    " (returned {})".format(returned_count) if returned_count is not None else "",
-                )
-            )
-
-        return {
-            "capture": {"path": capture_path, "encoded_path": encode_capture_path(capture_path)},
-            "result": result,
-            "summary": {"headline": headline},
-            "warnings": warnings,
-            "error": None,
-        }
-
-    def error_response(self, capture_path: str, error: RenderDocMCPError, headline: str) -> dict[str, Any]:
-        normalized = str(Path(capture_path)) if capture_path else ""
-        return {
-            "capture": {
-                "path": normalized,
-                "encoded_path": encode_capture_path(normalized) if normalized else "",
-            },
-            "result": None,
-            "summary": {"headline": headline},
-            "warnings": [],
-            "error": error.to_payload(),
-        }
+    def read_ui_config(self) -> dict[str, Any]:
+        path = ui_config_path()
+        if not path.exists():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def normalize_capture_path(self, capture_path: str) -> str:
         path = Path(capture_path).expanduser()
@@ -94,11 +60,11 @@ class ServiceContext:
             raise CapturePathError(str(path))
         return str(path.resolve())
 
-    def read_ui_config(self) -> dict[str, Any]:
-        path = ui_config_path()
-        if not path.exists():
-            return {}
-        return json.loads(path.read_text(encoding="utf-8"))
+    def normalize_required_capture_id(self, capture_id: Any) -> str:
+        try:
+            return normalize_capture_id(self.normalize_required_string(capture_id, "capture_id"))
+        except ValueError as exc:
+            raise ReplayFailureError(str(exc), {"capture_id": capture_id}) from exc
 
     def normalize_optional_string(self, value: Any) -> str | None:
         if value is None:

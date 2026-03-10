@@ -63,6 +63,24 @@ CONNECT_RETRY_SECONDS = 20.0
 _bridge = None
 
 
+class BridgeError(Exception):
+    def __init__(self, code, message, details=None):
+        super().__init__(message)
+        self.code = str(code)
+        self.message = str(message)
+        self.details = dict(details or {})
+
+    def to_payload(self):
+        payload = {"code": self.code, "message": self.message}
+        if self.details:
+            payload["details"] = self.details
+        return payload
+
+    @classmethod
+    def from_payload(cls, payload):
+        return cls(payload.get("code", "replay_failure"), payload.get("message", "RenderDoc request failed."), payload.get("details"))
+
+
 def _shader_stage_from_name(stage_name):
     normalized = str(stage_name or "").strip().lower()
     for stage in _shader_stage_values():
@@ -181,6 +199,84 @@ class BridgeClient(object):
         self.thread = None
         self.analysis_cache = frame_analysis.AnalysisCache()
         self.timing_cache = frame_analysis.AnalysisCache()
+        self.handlers = self._build_handlers()
+
+    def _build_handlers(self):
+        return {
+            "load_capture": lambda params: self._load_capture(params.get("capture_path", "")),
+            "get_capture_status": lambda params: self._capture_status(),
+            "get_capture_summary": lambda params: self._get_capture_summary(),
+            "get_action_tree": lambda params: self._get_action_tree(
+                params.get("max_depth"),
+                params.get("name_filter"),
+                params.get("limit"),
+            ),
+            "list_actions": lambda params: self._list_actions(
+                params.get("max_depth"),
+                params.get("name_filter"),
+                params.get("cursor"),
+                params.get("limit"),
+            ),
+            "analyze_frame": lambda params: self._analyze_frame(bool(params.get("include_timing_summary", False))),
+            "list_passes": lambda params: self._list_passes(
+                params.get("cursor"),
+                params.get("limit"),
+                params.get("category_filter"),
+                params.get("name_filter"),
+                params.get("sort_by", "event_order"),
+                params.get("threshold_ms"),
+            ),
+            "get_pass_details": lambda params: self._get_pass_details(params.get("pass_id", "")),
+            "get_timing_data": lambda params: self._get_timing_data(params.get("pass_id", "")),
+            "get_performance_hotspots": lambda params: self._get_performance_hotspots(),
+            "get_action_details": lambda params: self._get_action_details(int(params.get("event_id", 0))),
+            "get_pipeline_state": lambda params: self._get_pipeline_state(int(params.get("event_id", 0))),
+            "get_api_pipeline_state": lambda params: self._get_api_pipeline_state(int(params.get("event_id", 0))),
+            "get_shader_code": lambda params: self._get_shader_code(
+                int(params.get("event_id", 0)),
+                params.get("stage", ""),
+                params.get("target"),
+            ),
+            "list_resources": lambda params: self._list_resources(params.get("kind", "all"), params.get("name_filter")),
+            "get_pixel_history": lambda params: self._get_pixel_history(
+                params.get("texture_id", ""),
+                int(params.get("x", 0)),
+                int(params.get("y", 0)),
+                int(params.get("mip_level", 0)),
+                int(params.get("array_slice", 0)),
+                int(params.get("sample", 0)),
+            ),
+            "debug_pixel": lambda params: self._debug_pixel(
+                params.get("texture_id", ""),
+                int(params.get("x", 0)),
+                int(params.get("y", 0)),
+                int(params.get("mip_level", 0)),
+                int(params.get("array_slice", 0)),
+                int(params.get("sample", 0)),
+            ),
+            "get_texture_data": lambda params: self._get_texture_data(
+                params.get("texture_id", ""),
+                int(params.get("mip_level", 0)),
+                int(params.get("x", 0)),
+                int(params.get("y", 0)),
+                int(params.get("width", 0)),
+                int(params.get("height", 0)),
+                int(params.get("array_slice", 0)),
+                int(params.get("sample", 0)),
+            ),
+            "get_buffer_data": lambda params: self._get_buffer_data(
+                params.get("buffer_id", ""),
+                int(params.get("offset", 0)),
+                int(params.get("size", 0)),
+            ),
+            "save_texture_to_file": lambda params: self._save_texture_to_file(
+                params.get("texture_id", ""),
+                params.get("output_path", ""),
+                int(params.get("mip_level", 0)),
+                int(params.get("array_slice", 0)),
+            ),
+            "close_capture": lambda params: self._close_capture(),
+        }
 
     def start(self):
         host = os.environ.get("RENDERDOC_MCP_BRIDGE_HOST")
@@ -250,6 +346,8 @@ class BridgeClient(object):
         def runner():
             try:
                 result["value"] = callback()
+            except BridgeError as exc:
+                result["error"] = exc.to_payload()
             except Exception:
                 result["error"] = {
                     "code": "replay_failure",
@@ -263,32 +361,21 @@ class BridgeClient(object):
         done.wait()
 
         if "error" in result:
-            raise RuntimeError(json.dumps(result["error"]))
+            raise BridgeError.from_payload(result["error"])
 
         return result.get("value", {})
 
     def _ensure_capture_loaded(self):
         if not self.ctx.IsCaptureLoaded():
-            raise RuntimeError(
-                json.dumps(
-                    {
-                        "code": "replay_failure",
-                        "message": "No capture is currently loaded in qrenderdoc.",
-                    }
-                )
-            )
+            raise BridgeError("replay_failure", "No capture is currently loaded in qrenderdoc.")
 
     def _set_event(self, event_id):
         action = self.ctx.GetAction(event_id)
         if action is None:
-            raise RuntimeError(
-                json.dumps(
-                    {
-                        "code": "invalid_event_id",
-                        "message": "The supplied event_id does not exist in the current capture.",
-                        "details": {"event_id": int(event_id)},
-                    }
-                )
+            raise BridgeError(
+                "invalid_event_id",
+                "The supplied event_id does not exist in the current capture.",
+                {"event_id": int(event_id)},
             )
         try:
             self.ctx.SetEventID([], event_id, event_id, True)
@@ -684,6 +771,16 @@ class BridgeClient(object):
             "resource_counts": analysis["resource_counts"],
         }
 
+    def _get_action_tree(self, max_depth, name_filter, limit):
+        analysis = self._ensure_frame_analysis()
+        return frame_analysis.build_action_tree_result(
+            analysis["action_tree"],
+            analysis["total_actions"],
+            max_depth=max_depth,
+            name_filter=name_filter,
+            limit=limit,
+        )
+
     def _list_actions(self, max_depth, name_filter, cursor, limit):
         analysis = self._ensure_frame_analysis()
         return frame_analysis.build_action_list_result(
@@ -722,28 +819,20 @@ class BridgeClient(object):
         analysis = self._ensure_frame_analysis()
         details = frame_analysis.get_pass_details(analysis, pass_id)
         if details is None:
-            raise RuntimeError(
-                json.dumps(
-                    {
-                        "code": "invalid_pass_id",
-                        "message": "The supplied pass_id does not exist in the active frame analysis.",
-                        "details": {"pass_id": pass_id},
-                    }
-                )
+            raise BridgeError(
+                "invalid_pass_id",
+                "The supplied pass_id does not exist in the active frame analysis.",
+                {"pass_id": pass_id},
             )
         return details
 
     def _get_timing_data(self, pass_id):
         analysis = self._ensure_frame_analysis()
         if frame_analysis.get_pass_details(analysis, pass_id) is None:
-            raise RuntimeError(
-                json.dumps(
-                    {
-                        "code": "invalid_pass_id",
-                        "message": "The supplied pass_id does not exist in the active frame analysis.",
-                        "details": {"pass_id": pass_id},
-                    }
-                )
+            raise BridgeError(
+                "invalid_pass_id",
+                "The supplied pass_id does not exist in the active frame analysis.",
+                {"pass_id": pass_id},
             )
         return frame_analysis.build_timing_result(analysis, pass_id, self._ensure_timing_data())
 
@@ -769,10 +858,10 @@ class BridgeClient(object):
         self.ctx.Replay().BlockInvoke(callback)
         return details
 
-    def _get_pipeline_state(self, event_id, detail_level):
+    def _get_pipeline_state(self, event_id):
         self._ensure_capture_loaded()
         action = self._set_event(event_id)
-        response = {"event_id": int(event_id), "detail_level": str(detail_level or "portable")}
+        response = {"event_id": int(event_id)}
 
         def callback(controller):
             state = controller.GetPipelineState()
@@ -801,24 +890,38 @@ class BridgeClient(object):
                 if serialized is not None:
                     response["pipeline"]["shaders"].append(serialized)
 
-            if detail_level == "api_specific":
-                api_name = response["api"]
-                if api_name == "D3D12" and hasattr(controller, "GetD3D12PipelineState"):
-                    response["api_pipeline"] = _serialize_d3d12_pipeline_state(
-                        self.ctx,
-                        controller.GetD3D12PipelineState(),
-                    )
-                elif api_name == "Vulkan" and hasattr(controller, "GetVulkanPipelineState"):
-                    response["api_pipeline"] = _serialize_vulkan_pipeline_state(
-                        self.ctx,
-                        controller.GetVulkanPipelineState(),
-                    )
-                else:
-                    response["api_pipeline"] = {
-                        "api": api_name,
-                        "available": False,
-                        "reason": "No API-specific pipeline serializer is implemented for this capture API.",
-                    }
+        self.ctx.Replay().BlockInvoke(callback)
+        return response
+
+    def _get_api_pipeline_state(self, event_id):
+        self._ensure_capture_loaded()
+        action = self._set_event(event_id)
+        response = {"event_id": int(event_id)}
+
+        def callback(controller):
+            api_name = _api_name(controller)
+            response["api"] = api_name
+            response["action"] = {
+                "event_id": int(action.eventId),
+                "name": action.GetName(controller.GetStructuredFile()) or action.customName or "Event {}".format(action.eventId),
+                "flags": _action_flags(action),
+            }
+            if api_name == "D3D12" and hasattr(controller, "GetD3D12PipelineState"):
+                response["api_pipeline"] = _serialize_d3d12_pipeline_state(
+                    self.ctx,
+                    controller.GetD3D12PipelineState(),
+                )
+            elif api_name == "Vulkan" and hasattr(controller, "GetVulkanPipelineState"):
+                response["api_pipeline"] = _serialize_vulkan_pipeline_state(
+                    self.ctx,
+                    controller.GetVulkanPipelineState(),
+                )
+            else:
+                response["api_pipeline"] = {
+                    "api": api_name,
+                    "available": False,
+                    "reason": "No API-specific pipeline serializer is implemented for this capture API.",
+                }
 
         self.ctx.Replay().BlockInvoke(callback)
         return response
@@ -1128,108 +1231,17 @@ class BridgeClient(object):
             "items": items,
         }
 
+    def _close_capture(self):
+        if self.ctx.IsCaptureLoaded():
+            self._clear_analysis_cache()
+            self.ctx.CloseCapture()
+        return {"closed": True, "meta": {}}
+
     def _dispatch(self, method, params):
-        if method == "load_capture":
-            return self._load_capture(params.get("capture_path", ""))
-        if method == "get_capture_status":
-            return self._capture_status()
-        if method == "get_capture_summary":
-            return self._get_capture_summary()
-        if method == "list_actions":
-            return self._list_actions(
-                params.get("max_depth"),
-                params.get("name_filter"),
-                params.get("cursor"),
-                params.get("limit"),
-            )
-        if method == "analyze_frame":
-            return self._analyze_frame(bool(params.get("include_timing_summary", False)))
-        if method == "list_passes":
-            return self._list_passes(
-                params.get("cursor"),
-                params.get("limit"),
-                params.get("category_filter"),
-                params.get("name_filter"),
-                params.get("sort_by", "event_order"),
-                params.get("threshold_ms"),
-            )
-        if method == "get_pass_details":
-            return self._get_pass_details(params.get("pass_id", ""))
-        if method == "get_timing_data":
-            return self._get_timing_data(params.get("pass_id", ""))
-        if method == "get_performance_hotspots":
-            return self._get_performance_hotspots()
-        if method == "get_action_details":
-            return self._get_action_details(int(params.get("event_id", 0)))
-        if method == "get_pipeline_state":
-            return self._get_pipeline_state(
-                int(params.get("event_id", 0)),
-                params.get("detail_level", "portable"),
-            )
-        if method == "get_shader_code":
-            return self._get_shader_code(
-                int(params.get("event_id", 0)),
-                params.get("stage", ""),
-                params.get("target"),
-            )
-        if method == "list_resources":
-            return self._list_resources(params.get("kind", "all"), params.get("name_filter"))
-        if method == "get_pixel_history":
-            return self._get_pixel_history(
-                params.get("texture_id", ""),
-                int(params.get("x", 0)),
-                int(params.get("y", 0)),
-                int(params.get("mip_level", 0)),
-                int(params.get("array_slice", 0)),
-                int(params.get("sample", 0)),
-            )
-        if method == "debug_pixel":
-            return self._debug_pixel(
-                params.get("texture_id", ""),
-                int(params.get("x", 0)),
-                int(params.get("y", 0)),
-                int(params.get("mip_level", 0)),
-                int(params.get("array_slice", 0)),
-                int(params.get("sample", 0)),
-            )
-        if method == "get_texture_data":
-            return self._get_texture_data(
-                params.get("texture_id", ""),
-                int(params.get("mip_level", 0)),
-                int(params.get("x", 0)),
-                int(params.get("y", 0)),
-                int(params.get("width", 0)),
-                int(params.get("height", 0)),
-                int(params.get("array_slice", 0)),
-                int(params.get("sample", 0)),
-            )
-        if method == "get_buffer_data":
-            return self._get_buffer_data(
-                params.get("buffer_id", ""),
-                int(params.get("offset", 0)),
-                int(params.get("size", 0)),
-            )
-        if method == "save_texture_to_file":
-            return self._save_texture_to_file(
-                params.get("texture_id", ""),
-                params.get("output_path", ""),
-                int(params.get("mip_level", 0)),
-                int(params.get("array_slice", 0)),
-            )
-        if method == "close_capture":
-            if self.ctx.IsCaptureLoaded():
-                self._clear_analysis_cache()
-                self.ctx.CloseCapture()
-            return {"closed": True}
-        raise RuntimeError(
-            json.dumps(
-                {
-                    "code": "replay_failure",
-                    "message": "Unknown bridge method.",
-                    "details": {"method": method},
-                }
-            )
-        )
+        handler = self.handlers.get(method)
+        if handler is None:
+            raise BridgeError("replay_failure", "Unknown bridge method.", {"method": method})
+        return handler(params or {})
 
     def _run(self):
         while not self.stop_event.is_set():
@@ -1257,6 +1269,8 @@ class BridgeClient(object):
         self.stop()
 
     def _parse_exception(self, exc):
+        if isinstance(exc, BridgeError):
+            return exc.to_payload()
         try:
             payload = json.loads(str(exc))
             if isinstance(payload, dict) and "message" in payload:

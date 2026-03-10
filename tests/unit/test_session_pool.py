@@ -4,9 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import renderdoc_mcp.services.common as common_module
 from renderdoc_mcp.bridge import QRenderDocBridge
-from renderdoc_mcp.service import RenderDocService
 from renderdoc_mcp.session_pool import CaptureSessionPool
 
 
@@ -23,35 +21,7 @@ class FakeClock:
 
 class FakeBridge:
     def __init__(self) -> None:
-        self.loaded: list[str] = []
-        self.calls: list[tuple[str, dict]] = []
         self.closed = 0
-
-    def ensure_capture_loaded(self, capture_path: str) -> dict[str, bool]:
-        self.loaded.append(capture_path)
-        return {"loaded": True}
-
-    def call(self, method: str, params=None) -> dict:
-        payload = params or {}
-        self.calls.append((method, payload))
-        if method == "get_capture_summary":
-            return {"api": "D3D12"}
-        if method == "analyze_frame":
-            return {"passes": [], "pass_count": 0}
-        if method == "list_actions":
-            return {
-                "actions": [],
-                "count": 0,
-                "matched_count": 0,
-                "returned_count": 0,
-                "truncated": False,
-                "limit": int(payload.get("limit", 0)),
-                "has_more": False,
-                "next_cursor": "",
-                "cursor": str(payload.get("cursor", 0)),
-                "page_mode": "flat_preorder",
-            }
-        return {"ok": True}
 
     def close(self) -> None:
         self.closed += 1
@@ -63,42 +33,31 @@ def _capture(tmp_path: Path, name: str) -> str:
     return str(capture_path.resolve())
 
 
-def test_service_reuses_one_pooled_bridge_per_capture(tmp_path: Path, monkeypatch) -> None:
+def test_session_pool_opens_and_reuses_capture_ids(tmp_path: Path) -> None:
     capture_path = _capture(tmp_path, "sample.rdc")
     created: list[FakeBridge] = []
     pool = CaptureSessionPool(bridge_factory=lambda: created.append(FakeBridge()) or created[-1])
-    monkeypatch.setattr(common_module, "get_capture_session_pool", lambda: pool)
 
-    service = RenderDocService()
-    service.get_capture_summary(capture_path)
-    service.analyze_frame(capture_path)
-    service.list_actions(capture_path, cursor=0, limit=10)
+    session = pool.open(capture_path)
+    with pool.lease(session.capture_id) as leased:
+        assert leased.capture_id == session.capture_id
+        assert leased.capture_path == capture_path
 
     assert len(created) == 1
-    assert created[0].loaded == [capture_path, capture_path, capture_path]
-    assert [item[0] for item in created[0].calls] == [
-        "get_capture_summary",
-        "analyze_frame",
-        "list_actions",
-    ]
+    assert pool.get(session.capture_id) is not None
 
 
-def test_session_pool_creates_distinct_bridges_for_distinct_captures(tmp_path: Path) -> None:
-    first_capture = _capture(tmp_path, "first.rdc")
-    second_capture = _capture(tmp_path, "second.rdc")
+def test_session_pool_creates_distinct_sessions_for_distinct_opens(tmp_path: Path) -> None:
+    capture_path = _capture(tmp_path, "sample.rdc")
     created: list[FakeBridge] = []
     pool = CaptureSessionPool(bridge_factory=lambda: created.append(FakeBridge()) or created[-1])
 
-    with pool.lease(first_capture) as first_bridge:
-        pass
-    with pool.lease(second_capture) as second_bridge:
-        pass
-    with pool.lease(first_capture) as reused_bridge:
-        pass
+    first = pool.open(capture_path)
+    second = pool.open(capture_path)
 
+    assert first.capture_id != second.capture_id
+    assert pool.session_count() == 2
     assert len(created) == 2
-    assert first_bridge is reused_bridge
-    assert first_bridge is not second_bridge
 
 
 def test_session_pool_evicts_only_expired_idle_sessions(tmp_path: Path) -> None:
@@ -112,17 +71,16 @@ def test_session_pool_evicts_only_expired_idle_sessions(tmp_path: Path) -> None:
         monotonic=clock,
     )
 
-    with pool.lease(first_capture):
-        pass
+    first = pool.open(first_capture)
     clock.advance(5.0)
-    with pool.lease(second_capture):
-        pass
+    second = pool.open(second_capture)
 
     clock.advance(6.0)
     evicted = pool.evict_idle_sessions()
 
-    assert evicted == [first_capture]
-    assert pool.session_count() == 1
+    assert evicted == [first.capture_id]
+    assert pool.get(first.capture_id) is None
+    assert pool.get(second.capture_id) is not None
     assert created[0].closed == 1
     assert created[1].closed == 0
 
@@ -137,19 +95,30 @@ def test_session_pool_keeps_in_use_sessions_during_cleanup(tmp_path: Path) -> No
         monotonic=clock,
     )
 
-    with pool.lease(capture_path) as bridge:
+    session = pool.open(capture_path)
+    with pool.lease(session.capture_id):
         clock.advance(11.0)
         evicted = pool.evict_idle_sessions()
         assert evicted == []
-        assert bridge.closed == 0
-        assert pool.session_count() == 1
+        assert created[0].closed == 0
 
     clock.advance(11.0)
     evicted = pool.evict_idle_sessions()
 
-    assert evicted == [capture_path]
+    assert evicted == [session.capture_id]
     assert created[0].closed == 1
-    assert pool.session_count() == 0
+
+
+def test_explicit_close_closes_bridge_and_removes_session(tmp_path: Path) -> None:
+    capture_path = _capture(tmp_path, "sample.rdc")
+    created: list[FakeBridge] = []
+    pool = CaptureSessionPool(bridge_factory=lambda: created.append(FakeBridge()) or created[-1])
+
+    session = pool.open(capture_path)
+
+    assert pool.close(session.capture_id) is True
+    assert pool.get(session.capture_id) is None
+    assert created[0].closed == 1
 
 
 def test_bridge_close_terminates_child_process_and_is_idempotent() -> None:

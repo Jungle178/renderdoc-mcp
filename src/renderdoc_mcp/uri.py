@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import base64
-from pathlib import Path
+import secrets
+import string
+
+CAPTURE_ID_ALPHABET = set(string.hexdigits.lower())
 
 
-def encode_capture_path(path: str | Path) -> str:
-    raw = str(Path(path)).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+def create_capture_id() -> str:
+    return secrets.token_hex(16)
 
 
-def decode_capture_path(encoded_path: str) -> str:
-    padding = "=" * (-len(encoded_path) % 4)
-    raw = base64.urlsafe_b64decode((encoded_path + padding).encode("ascii"))
-    return raw.decode("utf-8")
+def normalize_capture_id(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized or any(char not in CAPTURE_ID_ALPHABET for char in normalized):
+        raise ValueError("capture_id must be a non-empty lowercase hex string.")
+    return normalized

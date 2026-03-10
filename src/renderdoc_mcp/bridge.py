@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import csv
 import os
 import secrets
 import socket
@@ -32,6 +33,44 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _list_qrenderdoc_pids() -> set[int]:
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq qrenderdoc.exe", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5.0,
+        )
+    except Exception:
+        return set()
+
+    pids: set[int] = set()
+    for row in csv.reader(result.stdout.splitlines()):
+        if len(row) < 2:
+            continue
+        if row[0].strip('"').lower() != "qrenderdoc.exe":
+            continue
+        try:
+            pids.add(int(row[1]))
+        except ValueError:
+            continue
+    return pids
+
+
+def _kill_process_tree(pid: int) -> None:
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10.0,
+        )
+    except Exception:
+        pass
 
 
 class QRenderDocBridge:
@@ -112,76 +151,94 @@ class QRenderDocBridge:
         if self._reader is not None and self._writer is not None and self._connection is not None:
             return
 
-        self.close()
-
-        listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listen_socket.bind(("127.0.0.1", 0))
-        listen_socket.listen(1)
-        listen_socket.settimeout(0.5)
-        self._server_socket = listen_socket
-
         qrenderdoc_path = resolve_qrenderdoc_path()
-        token = secrets.token_urlsafe(24)
-        log_path = str(Path(tempfile.gettempdir()) / ("renderdoc_mcp_bridge_{}.log".format(token)))
-        self._log_path = log_path
-        env = os.environ.copy()
-        env.update(
-            {
-                "RENDERDOC_MCP_BRIDGE_HOST": "127.0.0.1",
-                "RENDERDOC_MCP_BRIDGE_PORT": str(listen_socket.getsockname()[1]),
-                "RENDERDOC_MCP_BRIDGE_TOKEN": token,
-                "RENDERDOC_MCP_BRIDGE_PROTOCOL": str(BRIDGE_PROTOCOL_VERSION),
-                "RENDERDOC_MCP_BRIDGE_LOG": log_path,
-            }
-        )
+        last_log_path: str | None = None
 
-        self._process = subprocess.Popen([str(qrenderdoc_path)], cwd=str(qrenderdoc_path.parent), env=env)
-
-        deadline = time.monotonic() + self.timeout_seconds
-        connection: socket.socket | None = None
-
-        while time.monotonic() < deadline:
-            try:
-                connection, _ = listen_socket.accept()
-                break
-            except TimeoutError:
-                continue
-            except OSError:
-                break
-
-        if connection is None:
+        for attempt in range(2):
             self.close()
-            raise BridgeHandshakeTimeoutError(self.timeout_seconds, self._log_path)
 
-        connection.settimeout(self.timeout_seconds)
-        reader = connection.makefile("r", encoding="utf-8", newline="\n")
-        writer = connection.makefile("w", encoding="utf-8", newline="\n")
+            existing_pids = _list_qrenderdoc_pids()
+            listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listen_socket.bind(("127.0.0.1", 0))
+            listen_socket.listen(1)
+            listen_socket.settimeout(0.5)
+            self._server_socket = listen_socket
 
-        try:
-            hello = read_message(reader)
-        except Exception as exc:
-            writer.close()
-            reader.close()
-            close_socket(connection)
-            self.close()
-            raise BridgeHandshakeTimeoutError(self.timeout_seconds, self._log_path) from exc
-
-        if hello.get("type") != "hello" or hello.get("token") != token:
-            writer.close()
-            reader.close()
-            close_socket(connection)
-            self.close()
-            raise ReplayFailureError(
-                "Received an invalid bridge handshake from qrenderdoc.",
-                {"hello": hello, "log_path": self._log_path},
+            token = secrets.token_urlsafe(24)
+            log_path = str(Path(tempfile.gettempdir()) / ("renderdoc_mcp_bridge_{}.log".format(token)))
+            last_log_path = log_path
+            self._log_path = log_path
+            env = os.environ.copy()
+            env.update(
+                {
+                    "RENDERDOC_MCP_BRIDGE_HOST": "127.0.0.1",
+                    "RENDERDOC_MCP_BRIDGE_PORT": str(listen_socket.getsockname()[1]),
+                    "RENDERDOC_MCP_BRIDGE_TOKEN": token,
+                    "RENDERDOC_MCP_BRIDGE_PROTOCOL": str(BRIDGE_PROTOCOL_VERSION),
+                    "RENDERDOC_MCP_BRIDGE_LOG": log_path,
+                }
             )
 
-        self._connection = connection
-        self._reader = reader
-        self._writer = writer
-        close_socket(self._server_socket)
-        self._server_socket = None
+            self._process = subprocess.Popen([str(qrenderdoc_path)], cwd=str(qrenderdoc_path.parent), env=env)
+
+            deadline = time.monotonic() + self.timeout_seconds
+            connection: socket.socket | None = None
+
+            while time.monotonic() < deadline:
+                try:
+                    connection, _ = listen_socket.accept()
+                    break
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+
+            if connection is None:
+                self.close()
+                if attempt == 0 and existing_pids:
+                    for pid in existing_pids:
+                        _kill_process_tree(pid)
+                    time.sleep(1.0)
+                    continue
+                raise BridgeHandshakeTimeoutError(self.timeout_seconds, last_log_path)
+
+            connection.settimeout(self.timeout_seconds)
+            reader = connection.makefile("r", encoding="utf-8", newline="\n")
+            writer = connection.makefile("w", encoding="utf-8", newline="\n")
+
+            try:
+                hello = read_message(reader)
+            except Exception as exc:
+                writer.close()
+                reader.close()
+                close_socket(connection)
+                self.close()
+                if attempt == 0 and existing_pids:
+                    for pid in existing_pids:
+                        _kill_process_tree(pid)
+                    time.sleep(1.0)
+                    continue
+                raise BridgeHandshakeTimeoutError(self.timeout_seconds, last_log_path) from exc
+
+            if hello.get("type") != "hello" or hello.get("token") != token:
+                writer.close()
+                reader.close()
+                close_socket(connection)
+                self.close()
+                raise ReplayFailureError(
+                    "Received an invalid bridge handshake from qrenderdoc.",
+                    {"hello": hello, "log_path": self._log_path},
+                )
+
+            self._connection = connection
+            self._reader = reader
+            self._writer = writer
+            close_socket(self._server_socket)
+            self._server_socket = None
+            return
+
+        raise BridgeHandshakeTimeoutError(self.timeout_seconds, last_log_path)
 
     def _call_locked(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if self._reader is None or self._writer is None:

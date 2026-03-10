@@ -22,6 +22,9 @@ class RenderDocMCPError(RuntimeError):
             payload["details"] = self.details
         return payload
 
+    def __str__(self) -> str:
+        return f"{self.code}: {self.message}"
+
 
 class RenderDocNotInstalledError(RenderDocMCPError):
     def __init__(self, checked_path: str | None = None) -> None:
@@ -39,6 +42,15 @@ class CapturePathError(RenderDocMCPError):
             "capture_path_not_found",
             "The supplied capture_path does not exist or is not a file.",
             {"capture_path": capture_path},
+        )
+
+
+class InvalidCaptureIDError(RenderDocMCPError):
+    def __init__(self, capture_id: str) -> None:
+        super().__init__(
+            "invalid_capture_id",
+            "The supplied capture_id does not exist or has already been closed.",
+            {"capture_id": capture_id},
         )
 
 
