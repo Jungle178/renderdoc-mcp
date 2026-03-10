@@ -32,6 +32,46 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _find_legacy_surface_ref() -> str:
+    repo_root = _repo_root()
+    if not (repo_root / ".git").exists():
+        pytest.skip("The AI parity test requires a local git checkout.")
+
+    history = subprocess.run(
+        ["git", "rev-list", "--max-count", "20", "HEAD"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10.0,
+    )
+    if history.returncode != 0:
+        pytest.skip(f"Unable to inspect git history: {history.stderr.strip()}")
+
+    refs = [line.strip() for line in history.stdout.splitlines() if line.strip()]
+    for ref in refs[1:]:
+        probe = subprocess.run(
+            [
+                "git",
+                "grep",
+                "-n",
+                "def renderdoc_get_capture_summary",
+                ref,
+                "--",
+                "src/renderdoc_mcp/application/handlers/captures.py",
+            ],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10.0,
+        )
+        if probe.returncode == 0:
+            return ref
+
+    pytest.skip("Unable to find a recent git ref that still exposes the legacy MCP surface.")
+
+
 def _extract_git_ref(ref: str, destination: Path) -> None:
     repo_root = _repo_root()
     if not (repo_root / ".git").exists():
@@ -475,9 +515,10 @@ def test_ai_surface_semantic_parity() -> None:
 
     async def run_test() -> None:
         current_root = _repo_root()
+        legacy_ref = _find_legacy_surface_ref()
         with tempfile.TemporaryDirectory(prefix="renderdoc_mcp_legacy_") as temp_dir:
             legacy_root = Path(temp_dir) / "legacy"
-            _extract_git_ref("HEAD^", legacy_root)
+            _extract_git_ref(legacy_ref, legacy_root)
 
             current = await _collect_current_semantics(capture_path, current_root)
             legacy = await _collect_legacy_semantics(
