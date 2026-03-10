@@ -52,6 +52,8 @@ class QRenderDocBridge:
 
     def close(self) -> None:
         with self._lock:
+            process = self._process
+            self._process = None
             self._current_capture = None
             self._current_capture_token = None
             if self._writer is not None:
@@ -70,6 +72,22 @@ class QRenderDocBridge:
             self._connection = None
             close_socket(self._server_socket)
             self._server_socket = None
+            self._log_path = None
+
+            if process is not None:
+                try:
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5.0)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            try:
+                                process.wait(timeout=1.0)
+                            except subprocess.TimeoutExpired:
+                                pass
+                except OSError:
+                    pass
 
     def ensure_capture_loaded(self, capture_path: str) -> dict[str, Any]:
         path = Path(capture_path)

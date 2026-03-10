@@ -7,18 +7,33 @@ from typing import Any
 from renderdoc_mcp.bridge import QRenderDocBridge
 from renderdoc_mcp.errors import CapturePathError, ReplayFailureError, RenderDocMCPError
 from renderdoc_mcp.paths import ui_config_path
+from renderdoc_mcp.session_pool import CaptureSessionPool, get_capture_session_pool
 from renderdoc_mcp.uri import encode_capture_path
 
 NULL_LIKE_VALUES = {"", "null", "none", "undefined"}
 
 
 class ServiceContext:
-    def __init__(self, bridge: QRenderDocBridge | None = None) -> None:
-        self.bridge = bridge or QRenderDocBridge()
+    def __init__(
+        self,
+        bridge: QRenderDocBridge | None = None,
+        session_pool: CaptureSessionPool | None = None,
+    ) -> None:
+        if bridge is not None and session_pool is not None:
+            raise ValueError("bridge and session_pool are mutually exclusive")
+
+        self.bridge = bridge
+        self._session_pool = None if bridge is not None else (session_pool or get_capture_session_pool())
 
     def capture_tool(self, normalized_path: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        self.bridge.ensure_capture_loaded(normalized_path)
-        return self.bridge.call(method, params or {})
+        if self.bridge is not None:
+            self.bridge.ensure_capture_loaded(normalized_path)
+            return self.bridge.call(method, params or {})
+
+        assert self._session_pool is not None
+        with self._session_pool.lease(normalized_path) as bridge:
+            bridge.ensure_capture_loaded(normalized_path)
+            return bridge.call(method, params or {})
 
     def run_tool(self, capture_path: str, headline: str, callback: Any) -> dict[str, Any]:
         try:

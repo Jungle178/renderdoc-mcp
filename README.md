@@ -3,6 +3,7 @@
 `renderdoc-mcp` is a local stdio MCP server for inspecting existing RenderDoc `.rdc` captures on Windows.
 
 It launches `qrenderdoc.exe`, installs a small RenderDoc Python extension into `%APPDATA%\qrenderdoc\extensions`, and bridges MCP tool calls to RenderDoc's embedded Python API over a localhost socket.
+Within a single `renderdoc-mcp` process, requests for the same capture reuse the same `qrenderdoc` session.
 
 ## Features
 
@@ -89,6 +90,7 @@ Optional environment variables:
 
 - `RENDERDOC_QRENDERDOC_PATH`: absolute path to `qrenderdoc.exe`
 - `RENDERDOC_BRIDGE_TIMEOUT_SECONDS`: handshake timeout, default `30`
+- `RENDERDOC_CAPTURE_SESSION_IDLE_SECONDS`: idle timeout in seconds for per-capture `qrenderdoc` sessions, default `300`; set to `0` or a negative value to disable idle eviction
 
 ## Claude Desktop example
 
