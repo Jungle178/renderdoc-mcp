@@ -8,6 +8,10 @@ version = "0.1.0"
 description = "A Windows-first MCP server for inspecting RenderDoc captures."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+]
 dependencies = [
   "mcp>=1.26.0,<2.0.0",
 ]
