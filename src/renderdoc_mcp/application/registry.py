@@ -99,6 +99,11 @@ def build_tool_registry(application: RenderDocApplication) -> list[ToolRegistrat
             application.resources.renderdoc_get_resource_summary,
         ),
         ToolRegistration(
+            "renderdoc_list_resource_usages",
+            "List paged direct draw or action events that use a texture as an RT, depth target, copy source, or copy destination.",
+            application.resources.renderdoc_list_resource_usages,
+        ),
+        ToolRegistration(
             "renderdoc_get_pixel_history",
             "List paged pixel history modifications for a single texture pixel and subresource.",
             application.resources.renderdoc_get_pixel_history,

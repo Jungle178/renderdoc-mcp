@@ -7,12 +7,18 @@ def _resource(name: str) -> dict[str, str]:
     return {"resource_id": name.lower(), "resource_name": name}
 
 
+def _subresource(mip: int = 0, slice_index: int = 0, sample: int = 0) -> dict[str, int]:
+    return {"mip": mip, "slice": slice_index, "sample": sample}
+
+
 def _action(
     event_id: int,
     name: str,
     flags: list[str] | None = None,
     outputs: list[dict[str, str]] | None = None,
     depth_output: dict[str, str] | None = None,
+    copy_source: dict | None = None,
+    copy_destination: dict | None = None,
     children: list[dict] | None = None,
     num_indices: int = 0,
     num_instances: int = 1,
@@ -32,6 +38,9 @@ def _action(
         "dispatch_dimension": list(dispatch_dimension or [0, 0, 0]),
         "dispatch_threads_dimension": list(dispatch_threads_dimension or [0, 0, 0]),
         "outputs": list(outputs or []),
+        "copy_source": copy_source or {"resource_id": "", "resource_name": "", "subresource": _subresource()},
+        "copy_destination": copy_destination
+        or {"resource_id": "", "resource_name": "", "subresource": _subresource()},
         "depth_output": depth_output or {"resource_id": "", "resource_name": ""},
         "parent_event_id": None,
         "children": list(children or []),
@@ -44,7 +53,7 @@ def _action(
 
 
 def _count_stats(nodes: list[dict]) -> dict[str, int]:
-    stats = {"total_actions": 0, "draw_calls": 0, "dispatches": 0, "copies": 0, "clears": 0}
+    stats = {"total_actions": 0, "draw_calls": 0, "dispatches": 0, "copies": 0, "clears": 0, "resolves": 0}
     for node in nodes:
         stats["total_actions"] += 1
         flags = set(node["flags"])
@@ -56,6 +65,8 @@ def _count_stats(nodes: list[dict]) -> dict[str, int]:
             stats["copies"] += 1
         if "clear" in flags:
             stats["clears"] += 1
+        if "resolve" in flags:
+            stats["resolves"] += 1
         child_stats = _count_stats(node["children"])
         for key, value in child_stats.items():
             stats[key] += value
@@ -281,3 +292,163 @@ def test_build_performance_hotspots_orders_synthetic_gpu_rows() -> None:
     assert hotspots["basis"] == "gpu_timing"
     assert [item["name"] for item in hotspots["top_passes"]] == ["BasePass", "Shadow"]
     assert [item["event_id"] for item in hotspots["top_events"]] == [121, 111]
+
+
+def test_build_frame_analysis_indexes_texture_resource_usages() -> None:
+    nodes = [
+        _action(
+            10,
+            "Frame",
+            ["push_marker"],
+            children=[
+                _action(
+                    11,
+                    "BasePass",
+                    ["draw"],
+                    outputs=[_resource("SceneColor"), _resource("SceneColor")],
+                    depth_output=_resource("SceneDepth"),
+                ),
+                _action(
+                    12,
+                    "CopyColor",
+                    ["copy"],
+                    copy_source={
+                        "resource_id": "scenecolor",
+                        "resource_name": "SceneColor",
+                        "subresource": _subresource(mip=1, slice_index=2, sample=0),
+                    },
+                    copy_destination={
+                        "resource_id": "historycolor",
+                        "resource_name": "HistoryColor",
+                        "subresource": _subresource(mip=0, slice_index=0, sample=0),
+                    },
+                ),
+                _action(
+                    13,
+                    "ResolveDepth",
+                    ["resolve"],
+                    copy_source={
+                        "resource_id": "scenedepth",
+                        "resource_name": "SceneDepth",
+                        "subresource": _subresource(mip=0, slice_index=0, sample=4),
+                    },
+                    copy_destination={
+                        "resource_id": "resolveddepth",
+                        "resource_name": "ResolvedDepth",
+                        "subresource": _subresource(mip=0, slice_index=0, sample=0),
+                    },
+                ),
+            ],
+        )
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+
+    scene_color = analysis["resource_usage_index"]["scenecolor"]
+    assert [item["event_id"] for item in scene_color] == [11, 12]
+    assert scene_color[0]["matched_usage_kinds"] == ["color_output"]
+    assert scene_color[0]["bindings"] == [
+        {"usage_kind": "color_output", "slot_kind": "color", "slot_index": 0},
+        {"usage_kind": "color_output", "slot_kind": "color", "slot_index": 1},
+    ]
+    assert scene_color[1]["bindings"] == [
+        {
+            "usage_kind": "copy_source",
+            "subresource": {"mip": 1, "slice": 2, "sample": 0},
+        }
+    ]
+
+    scene_depth = analysis["resource_usage_index"]["scenedepth"]
+    assert [item["matched_usage_kinds"] for item in scene_depth] == [["depth_output"], ["resolve_source"]]
+    assert scene_depth[0]["bindings"] == [
+        {"usage_kind": "depth_output", "slot_kind": "depth", "slot_index": -1}
+    ]
+    assert scene_depth[1]["bindings"] == [
+        {
+            "usage_kind": "resolve_source",
+            "subresource": {"mip": 0, "slice": 0, "sample": 4},
+        }
+    ]
+
+
+def test_list_resource_usages_filters_and_pages() -> None:
+    nodes = [
+        _action(
+            10,
+            "Frame",
+            ["push_marker"],
+            children=[
+                _action(11, "DrawA", ["draw"], outputs=[_resource("SceneColor")]),
+                _action(
+                    12,
+                    "CopyA",
+                    ["copy"],
+                    copy_source={
+                        "resource_id": "scenecolor",
+                        "resource_name": "SceneColor",
+                        "subresource": _subresource(mip=0, slice_index=0, sample=0),
+                    },
+                ),
+                _action(13, "DrawB", ["draw"], outputs=[_resource("SceneColor")]),
+            ],
+        )
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+
+    filtered = frame_analysis.list_resource_usages(
+        analysis,
+        "scenecolor",
+        usage_kind="color_output",
+        cursor=1,
+        limit=1,
+    )
+    assert [item["event_id"] for item in filtered["events"]] == [13]
+    assert filtered["meta"]["page"]["total_count"] == 3
+    assert filtered["meta"]["page"]["matched_count"] == 2
+    assert filtered["meta"]["page"]["next_cursor"] == ""
+
+    empty = frame_analysis.list_resource_usages(analysis, "missingtexture", usage_kind="all", limit=10)
+    assert empty["events"] == []
+    assert empty["meta"]["page"]["total_count"] == 0
+
+
+def test_build_resource_usage_overview_summarizes_counts() -> None:
+    nodes = [
+        _action(
+            10,
+            "Frame",
+            ["push_marker"],
+            children=[
+                _action(
+                    11,
+                    "Draw",
+                    ["draw"],
+                    outputs=[_resource("SceneColor")],
+                    depth_output=_resource("SceneDepth"),
+                ),
+                _action(
+                    12,
+                    "Copy",
+                    ["copy"],
+                    copy_destination={
+                        "resource_id": "scenecolor",
+                        "resource_name": "SceneColor",
+                        "subresource": _subresource(mip=0, slice_index=0, sample=0),
+                    },
+                ),
+            ],
+        )
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    overview = frame_analysis.build_resource_usage_overview(analysis, "scenecolor")
+
+    assert overview["available"] is True
+    assert overview["supported_scope"] == "rt_texture_v1"
+    assert overview["total_matching_events"] == 2
+    assert overview["counts_by_kind"]["color_output"] == 1
+    assert overview["counts_by_kind"]["copy_destination"] == 1
+    assert overview["first_event_id"] == 11
+    assert overview["last_event_id"] == 12
+    assert overview["representative_events"][0]["event_id"] == 11

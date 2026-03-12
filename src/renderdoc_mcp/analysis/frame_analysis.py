@@ -1,4 +1,5 @@
 try:
+    from .resource_usage import RESOURCE_USAGE_KINDS, build_resource_usage_overview, list_resource_usages
     from .action_listing import (
         build_action_children_result,
         build_action_list_result,
@@ -31,6 +32,7 @@ try:
     )
     from .timing import build_analysis_result, build_timing_result, list_passes, list_timing_events
 except Exception:
+    from resource_usage import RESOURCE_USAGE_KINDS, build_resource_usage_overview, list_resource_usages
     from action_listing import (
         build_action_children_result,
         build_action_list_result,
@@ -75,6 +77,7 @@ __all__ = [
     "MAX_PAGE_LIMIT",
     "MAX_TIMING_EVENT_PAGE_LIMIT",
     "TOP_PASS_RANKING_LIMIT",
+    "RESOURCE_USAGE_KINDS",
     "action_summary",
     "build_action_children_result",
     "build_action_list_result",
@@ -83,10 +86,12 @@ __all__ = [
     "build_analysis_result",
     "build_frame_analysis",
     "build_performance_hotspots",
+    "build_resource_usage_overview",
     "build_timing_result",
     "compact_action_entry",
     "get_pass_details",
     "get_pass_summary",
+    "list_resource_usages",
     "list_passes",
     "list_timing_events",
     "pass_list_entry",

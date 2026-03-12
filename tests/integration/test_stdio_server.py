@@ -64,6 +64,7 @@ def test_stdio_tools_and_resources() -> None:
                     "renderdoc_get_shader_code_chunk",
                     "renderdoc_list_resources",
                     "renderdoc_get_resource_summary",
+                    "renderdoc_list_resource_usages",
                     "renderdoc_get_pixel_history",
                     "renderdoc_debug_pixel",
                     "renderdoc_start_pixel_shader_debug",
@@ -299,6 +300,36 @@ def test_stdio_tools_and_resources() -> None:
                         {"capture_id": capture_id, "resource_id": first_texture["resource_id"]},
                     )
                     assert not resource_summary.isError
+                    assert resource_summary.structuredContent["usage_overview"]["available"] is True
+                    assert resource_summary.structuredContent["recommended_calls"][0]["tool"] == "renderdoc_list_resource_usages"
+
+                    usage_probe = None
+                    for candidate in [item for item in items if item["kind"] == "texture"][:10]:
+                        probed = await session.call_tool(
+                            "renderdoc_list_resource_usages",
+                            {
+                                "capture_id": capture_id,
+                                "resource_id": candidate["resource_id"],
+                                "limit": 10,
+                            },
+                        )
+                        assert not probed.isError
+                        if probed.structuredContent["events"]:
+                            usage_probe = probed
+                            break
+                        if usage_probe is None:
+                            usage_probe = probed
+
+                    assert usage_probe is not None
+                    assert usage_probe.structuredContent["meta"]["page"]["limit"] == 10
+                    if usage_probe.structuredContent["events"]:
+                        usage_event_id = usage_probe.structuredContent["events"][0]["event_id"]
+                        usage_event = await session.call_tool(
+                            "renderdoc_get_action_summary",
+                            {"capture_id": capture_id, "event_id": usage_event_id},
+                        )
+                        assert not usage_event.isError
+                        assert usage_event.structuredContent["action"]["event_id"] == usage_event_id
 
                     pixel_history = await session.call_tool(
                         "renderdoc_get_pixel_history",

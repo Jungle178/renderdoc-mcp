@@ -169,6 +169,16 @@ def _serialize_action_analysis_node(ctx, action, structured_file):
             for res_id in action.outputs
             if _resource_id(res_id)
         ],
+        "copy_source": {
+            "resource_id": _resource_id(getattr(action, "copySource", None)),
+            "resource_name": _resource_name(ctx, getattr(action, "copySource", None)),
+            "subresource": _subresource(getattr(action, "copySourceSubresource", None)),
+        },
+        "copy_destination": {
+            "resource_id": _resource_id(getattr(action, "copyDestination", None)),
+            "resource_name": _resource_name(ctx, getattr(action, "copyDestination", None)),
+            "subresource": _subresource(getattr(action, "copyDestinationSubresource", None)),
+        },
         "depth_output": {
             "resource_id": _resource_id(action.depthOut),
             "resource_name": _resource_name(ctx, action.depthOut),

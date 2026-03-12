@@ -6,7 +6,7 @@ import pytest
 
 from renderdoc_mcp.application import RenderDocApplication
 from renderdoc_mcp.application.registry import build_resource_registry, build_tool_registry
-from renderdoc_mcp.errors import InvalidCaptureIDError, ReplayFailureError
+from renderdoc_mcp.errors import InvalidCaptureIDError, RenderDocMCPError, ReplayFailureError
 from renderdoc_mcp.session_pool import CaptureSessionPool
 
 
@@ -213,10 +213,68 @@ class DummyBridge:
                 },
             }
         if method == "get_resource_summary":
+            if payload["resource_id"] == "BufferId::1":
+                return {
+                    "resource": {"resource_id": payload["resource_id"], "kind": "buffer"},
+                    "usage_overview": {
+                        "available": False,
+                        "reason": "Resource usage listing currently supports texture RT and copy usage only.",
+                    },
+                    "recommended_calls": [{"tool": "renderdoc_get_buffer_data", "arguments": {"buffer_id": payload["resource_id"], "offset": 0}}],
+                    "meta": {},
+                }
             return {
                 "resource": {"resource_id": payload["resource_id"], "kind": "texture"},
-                "recommended_calls": [],
+                "usage_overview": {
+                    "available": True,
+                    "supported_scope": "rt_texture_v1",
+                    "total_matching_events": 1,
+                    "counts_by_kind": {
+                        "color_output": 1,
+                        "depth_output": 0,
+                        "copy_source": 0,
+                        "copy_destination": 0,
+                        "resolve_source": 0,
+                        "resolve_destination": 0,
+                    },
+                    "first_event_id": 42,
+                    "last_event_id": 42,
+                    "representative_events": [{"event_id": 42, "name": "Draw", "flags": ["draw"]}],
+                },
+                "recommended_calls": [{"tool": "renderdoc_list_resource_usages", "arguments": {"resource_id": payload["resource_id"]}}],
                 "meta": {},
+            }
+        if method == "list_resource_usages":
+            if payload["resource_id"] == "BufferId::1":
+                raise RenderDocMCPError(
+                    "resource_usage_unsupported",
+                    "Resource usage listing currently supports texture RT and copy usage only.",
+                    {"resource_id": payload["resource_id"], "resource_kind": "buffer"},
+                )
+            return {
+                "resource_id": payload["resource_id"],
+                "usage_kind": payload.get("usage_kind", "all"),
+                "events": [
+                    {
+                        "event_id": 42,
+                        "name": "Draw",
+                        "flags": ["draw"],
+                        "parent_event_id": 1,
+                        "matched_usage_kinds": ["color_output"],
+                        "bindings": [{"usage_kind": "color_output", "slot_kind": "color", "slot_index": 0}],
+                    }
+                ],
+                "meta": {
+                    "page": {
+                        "cursor": str(payload.get("cursor", 0)),
+                        "next_cursor": "",
+                        "limit": int(payload.get("limit", 50)),
+                        "returned_count": 1,
+                        "total_count": 1,
+                        "matched_count": 1,
+                        "has_more": False,
+                    }
+                },
             }
         if method == "get_pixel_history":
             return {
@@ -379,7 +437,51 @@ def test_validation_errors_raise_domain_exceptions(tmp_path: Path) -> None:
     with pytest.raises(ReplayFailureError):
         application.resources.renderdoc_list_resources(opened["capture_id"], kind="bogus")
     with pytest.raises(ReplayFailureError):
+        application.resources.renderdoc_list_resource_usages(opened["capture_id"], "ResourceId::1", usage_kind="bogus")
+    with pytest.raises(ReplayFailureError):
         application.actions.renderdoc_list_pipeline_bindings(opened["capture_id"], event_id=7, binding_kind="bogus")
+
+
+def test_resource_usage_handlers_forward_and_attach_meta(tmp_path: Path) -> None:
+    application, created = _application()
+    capture_path = _capture(tmp_path)
+    opened = application.captures.renderdoc_open_capture(capture_path)
+
+    summary = application.resources.renderdoc_get_resource_summary(opened["capture_id"], " ResourceId::123 ")
+    usages = application.resources.renderdoc_list_resource_usages(
+        opened["capture_id"],
+        " ResourceId::123 ",
+        usage_kind=" color_output ",
+        cursor="0",
+        limit="25",
+    )
+
+    assert summary["usage_overview"]["supported_scope"] == "rt_texture_v1"
+    assert summary["recommended_calls"][0]["tool"] == "renderdoc_list_resource_usages"
+    assert usages["events"][0]["event_id"] == 42
+    assert usages["meta"]["page"]["limit"] == 25
+    assert created[0].calls[-2:] == [
+        ("get_resource_summary", {"resource_id": "ResourceId::123"}),
+        (
+            "list_resource_usages",
+            {"resource_id": "ResourceId::123", "usage_kind": "color_output", "limit": 25, "cursor": 0},
+        ),
+    ]
+
+
+def test_buffer_resource_usage_surface_reports_unsupported(tmp_path: Path) -> None:
+    application, _ = _application()
+    capture_path = _capture(tmp_path)
+    opened = application.captures.renderdoc_open_capture(capture_path)
+
+    summary = application.resources.renderdoc_get_resource_summary(opened["capture_id"], "BufferId::1")
+
+    assert summary["resource"]["kind"] == "buffer"
+    assert summary["usage_overview"]["available"] is False
+
+    with pytest.raises(RenderDocMCPError) as exc_info:
+        application.resources.renderdoc_list_resource_usages(opened["capture_id"], "BufferId::1")
+    assert exc_info.value.code == "resource_usage_unsupported"
 
 
 def test_shader_debug_handlers_normalize_and_forward_arguments(tmp_path: Path) -> None:
@@ -448,6 +550,7 @@ def test_registry_contains_new_breaking_api_surface() -> None:
         "renderdoc_get_analysis_worklist",
         "renderdoc_get_pipeline_overview",
         "renderdoc_get_shader_code_chunk",
+        "renderdoc_list_resource_usages",
         "renderdoc_start_pixel_shader_debug",
         "renderdoc_continue_shader_debug",
         "renderdoc_get_shader_debug_step",

@@ -1,7 +1,9 @@
 try:
     from .models import PASS_CATEGORIES, TOP_PASS_RANKING_LIMIT
+    from .resource_usage import build_resource_usage_index
 except Exception:
     from models import PASS_CATEGORIES, TOP_PASS_RANKING_LIMIT
+    from resource_usage import build_resource_usage_index
 
 _TAIL_CATEGORIES = {"setup", "copy_resolve", "ui_overlay", "presentation"}
 _GPU_WORK_FLAGS = {"draw", "dispatch", "copy", "resolve", "clear"}
@@ -102,6 +104,7 @@ def build_frame_analysis(nodes, metadata):
         "action_index": action_index,
         "action_children_index": action_children_index,
         "root_action_ids": action_children_index[""],
+        "resource_usage_index": build_resource_usage_index(annotated_nodes),
         "statistics": metadata["statistics"],
         "resource_counts": metadata["resource_counts"],
         "frame": metadata["frame"],

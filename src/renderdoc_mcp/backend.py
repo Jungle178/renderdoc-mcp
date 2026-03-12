@@ -54,7 +54,7 @@ def resolve_native_python_config() -> NativePythonConfig:
         raise NativePythonModuleNotFoundError(str(python_path), kind="python_executable")
 
     dll_dir_raw = str(os.environ.get("RENDERDOC_NATIVE_DLL_DIR", "") or "").strip()
-    dll_dir = Path(dll_dir_raw) if dll_dir_raw else module_dir
+    dll_dir = Path(dll_dir_raw) if dll_dir_raw else _default_native_dll_dir(module_dir)
     if not dll_dir.is_dir():
         raise NativePythonModuleNotFoundError(str(dll_dir), kind="dll_dir")
 
@@ -63,3 +63,16 @@ def resolve_native_python_config() -> NativePythonConfig:
         module_dir=module_dir,
         dll_dir=dll_dir,
     )
+
+
+def _default_native_dll_dir(module_dir: Path) -> Path:
+    candidates = [
+        module_dir,
+        module_dir.parent,
+        module_dir.parent.parent,
+    ]
+
+    for candidate in candidates:
+        if candidate.is_dir() and (candidate / "renderdoc.dll").is_file():
+            return candidate
+    return module_dir

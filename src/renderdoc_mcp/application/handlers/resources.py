@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from renderdoc_mcp.analysis.frame_analysis import MAX_PAGE_LIMIT, MAX_TIMING_EVENT_PAGE_LIMIT
+from renderdoc_mcp.analysis.frame_analysis import MAX_PAGE_LIMIT, MAX_TIMING_EVENT_PAGE_LIMIT, RESOURCE_USAGE_KINDS
 from renderdoc_mcp.application.context import ApplicationContext
 from renderdoc_mcp.application.response import attach_capture, ensure_meta
 from renderdoc_mcp.errors import ReplayFailureError
 
 SUPPORTED_RESOURCE_KINDS = {"all", "textures", "buffers"}
+SUPPORTED_RESOURCE_USAGE_KINDS = {"all", *RESOURCE_USAGE_KINDS}
 SUPPORTED_RESOURCE_SORT_OPTIONS = {"name", "size"}
 SUPPORTED_BUFFER_ENCODINGS = {"hex", "base64"}
 DEFAULT_RESOURCE_PAGE_LIMIT = 50
@@ -87,6 +88,43 @@ class ResourceHandlers:
             "get_resource_summary",
             {"resource_id": normalized_resource_id},
         )
+        return attach_capture(ensure_meta(result), session)
+
+    def renderdoc_list_resource_usages(
+        self,
+        capture_id: str,
+        resource_id: str,
+        usage_kind: str = "all",
+        cursor: int | str | None = None,
+        limit: int | str | None = None,
+    ) -> dict[str, Any]:
+        normalized_resource_id = self.context.normalize_required_string(resource_id, "resource_id")
+        normalized_usage_kind = (self.context.normalize_optional_string(usage_kind) or "all").lower()
+        normalized_cursor = self.context.normalize_optional_int(cursor, "cursor")
+        normalized_limit = self.context.normalize_optional_int(limit, "limit")
+
+        if normalized_usage_kind not in SUPPORTED_RESOURCE_USAGE_KINDS:
+            raise ReplayFailureError(
+                "usage_kind must be one of {}.".format(", ".join(sorted(SUPPORTED_RESOURCE_USAGE_KINDS))),
+                {"usage_kind": normalized_usage_kind},
+            )
+        if normalized_cursor is not None and normalized_cursor < 0:
+            raise ReplayFailureError("cursor must be greater than or equal to 0.", {"cursor": normalized_cursor})
+        if normalized_limit is not None and (normalized_limit <= 0 or normalized_limit > MAX_PAGE_LIMIT):
+            raise ReplayFailureError(
+                "limit must be between 1 and {}.".format(MAX_PAGE_LIMIT),
+                {"limit": normalized_limit},
+            )
+
+        params: dict[str, Any] = {
+            "resource_id": normalized_resource_id,
+            "usage_kind": normalized_usage_kind,
+            "limit": normalized_limit or DEFAULT_RESOURCE_PAGE_LIMIT,
+        }
+        if normalized_cursor is not None:
+            params["cursor"] = normalized_cursor
+
+        session, result = self.context.capture_tool(capture_id, "list_resource_usages", params)
         return attach_capture(ensure_meta(result), session)
 
     def renderdoc_get_pixel_history(

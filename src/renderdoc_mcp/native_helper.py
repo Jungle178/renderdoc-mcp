@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 import traceback
+from pathlib import Path
 from typing import Any
 
 from renderdoc_mcp.protocol import BRIDGE_PROTOCOL_VERSION, read_message, send_message
@@ -24,15 +25,57 @@ def _fatal(code: str, message: str, details: dict[str, Any] | None = None) -> in
     return 1
 
 
+def _iter_dll_search_dirs(module_dir: str, dll_dir: str) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def add(path: Path | str | None) -> None:
+        if path is None:
+            return
+        candidate = Path(path)
+        if not candidate.is_dir():
+            return
+        normalized = str(candidate.resolve())
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        ordered.append(normalized)
+
+    module_path = Path(module_dir) if module_dir else None
+    dll_path = Path(dll_dir) if dll_dir else None
+    add(module_path)
+    add(dll_path)
+
+    roots: list[Path] = []
+    for base in (module_path, dll_path):
+        if base is None:
+            continue
+        roots.extend(base.parents[:4])
+
+    for root in roots:
+        for arch in ("x64", "Win32"):
+            python_dir = root / "qrenderdoc" / "3rdparty" / "python" / arch
+            if any(python_dir.glob("python*.dll")):
+                add(python_dir)
+
+    return ordered
+
+
 def _configure_renderdoc_paths(module_dir: str, dll_dir: str) -> None:
     if module_dir and module_dir not in sys.path:
         sys.path.insert(0, module_dir)
 
-    if dll_dir:
-        os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
+    discovered_dirs = _iter_dll_search_dirs(module_dir, dll_dir)
+    if discovered_dirs:
+        existing_path = os.environ.get("PATH", "")
+        path_entries = list(discovered_dirs)
+        if existing_path:
+            path_entries.append(existing_path)
+        os.environ["PATH"] = os.pathsep.join(path_entries)
         add_dll_directory = getattr(os, "add_dll_directory", None)
         if callable(add_dll_directory):
-            add_dll_directory(dll_dir)
+            for path in discovered_dirs:
+                add_dll_directory(path)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

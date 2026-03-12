@@ -17,6 +17,7 @@ SHARED_ANALYSIS_MODULES = [
     "models.py",
     "action_listing.py",
     "pass_classification.py",
+    "resource_usage.py",
     "timing.py",
     "hotspots.py",
 ]

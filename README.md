@@ -41,6 +41,7 @@ This repository now exposes an AI-first v2 MCP surface:
 - `renderdoc_get_shader_code_chunk`
 - `renderdoc_list_resources`
 - `renderdoc_get_resource_summary`
+- `renderdoc_list_resource_usages`
 - `renderdoc_get_pixel_history`
 - `renderdoc_debug_pixel`
 - `renderdoc_start_pixel_shader_debug`
@@ -198,6 +199,15 @@ renderdoc_list_resources(
 
 ```powershell
 renderdoc_get_resource_summary(capture_id="<capture_id>", resource_id="ResourceId::123")
+```
+
+```powershell
+renderdoc_list_resource_usages(
+  capture_id="<capture_id>",
+  resource_id="ResourceId::123",
+  usage_kind="all",
+  limit=50
+)
 ```
 
 Small bounded data reads remain available:
@@ -389,6 +399,7 @@ uv run renderdoc-mcp
 - `renderdoc_get_shader_code_chunk`
 - `renderdoc_list_resources`
 - `renderdoc_get_resource_summary`
+- `renderdoc_list_resource_usages`
 - `renderdoc_get_pixel_history`
 - `renderdoc_debug_pixel`
 - `renderdoc_start_pixel_shader_debug`
@@ -480,6 +491,15 @@ renderdoc_list_resources(capture_id="<capture_id>", kind="all", limit=50, sort_b
 
 ```powershell
 renderdoc_get_resource_summary(capture_id="<capture_id>", resource_id="ResourceId::123")
+```
+
+```powershell
+renderdoc_list_resource_usages(
+  capture_id="<capture_id>",
+  resource_id="ResourceId::123",
+  usage_kind="all",
+  limit=50
+)
 ```
 
 ```powershell

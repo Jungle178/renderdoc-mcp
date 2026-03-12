@@ -469,6 +469,12 @@ class BridgeClient(object):
                 params.get("sort_by", "name"),
             ),
             "get_resource_summary": lambda params: self._get_resource_summary(params.get("resource_id", "")),
+            "list_resource_usages": lambda params: self._list_resource_usages(
+                params.get("resource_id", ""),
+                params.get("usage_kind", "all"),
+                params.get("cursor"),
+                params.get("limit"),
+            ),
             "get_pixel_history": lambda params: self._get_pixel_history(
                 params.get("texture_id", ""),
                 int(params.get("x", 0)),
@@ -936,6 +942,7 @@ class BridgeClient(object):
     def _resource_recommendations(self, item):
         if item["kind"] == "texture":
             return [
+                {"tool": "renderdoc_list_resource_usages", "arguments": {"resource_id": item["resource_id"]}},
                 {"tool": "renderdoc_get_texture_data", "arguments": {"texture_id": item["resource_id"]}},
                 {"tool": "renderdoc_get_pixel_history", "arguments": {"texture_id": item["resource_id"], "x": 0, "y": 0}},
                 {"tool": "renderdoc_debug_pixel", "arguments": {"texture_id": item["resource_id"], "x": 0, "y": 0}},
@@ -2441,23 +2448,63 @@ class BridgeClient(object):
             "meta": {"page": paging["page"]},
         }
 
-    def _get_resource_summary(self, resource_id):
+    def _resource_usage_target(self, resource_id):
         self._ensure_capture_loaded()
 
         for texture in self.ctx.GetTextures():
             if _resource_id_matches(texture.resourceId, resource_id):
-                item = self._compact_texture(texture)
-                return {"resource": item, "recommended_calls": self._resource_recommendations(item), "meta": {}}
+                return ("texture", texture)
 
         for buffer_desc in self.ctx.GetBuffers():
             if _resource_id_matches(buffer_desc.resourceId, resource_id):
-                item = self._compact_buffer(buffer_desc)
-                return {"resource": item, "recommended_calls": self._resource_recommendations(item), "meta": {}}
+                return ("buffer", buffer_desc)
 
         raise BridgeError(
             "invalid_resource_id",
             "The supplied resource_id does not exist in the active capture.",
             {"resource_id": resource_id},
+        )
+
+    def _get_resource_summary(self, resource_id):
+        resource_kind, resource = self._resource_usage_target(resource_id)
+        if resource_kind == "texture":
+            item = self._compact_texture(resource)
+            analysis = self._ensure_frame_analysis()
+            return {
+                "resource": item,
+                "usage_overview": frame_analysis.build_resource_usage_overview(analysis, item["resource_id"]),
+                "recommended_calls": self._resource_recommendations(item),
+                "meta": {},
+            }
+
+        item = self._compact_buffer(resource)
+        return {
+            "resource": item,
+            "usage_overview": {
+                "available": False,
+                "reason": "Resource usage listing currently supports texture RT and copy usage only.",
+            },
+            "recommended_calls": self._resource_recommendations(item),
+            "meta": {},
+        }
+
+    def _list_resource_usages(self, resource_id, usage_kind, cursor, limit):
+        resource_kind, resource = self._resource_usage_target(resource_id)
+        if resource_kind != "texture":
+            raise BridgeError(
+                "resource_usage_unsupported",
+                "Resource usage listing currently supports texture RT and copy usage only.",
+                {"resource_id": str(resource_id), "resource_kind": resource_kind},
+            )
+
+        analysis = self._ensure_frame_analysis()
+        item = self._compact_texture(resource)
+        return frame_analysis.list_resource_usages(
+            analysis,
+            item["resource_id"],
+            usage_kind=usage_kind,
+            cursor=cursor,
+            limit=limit,
         )
 
     def _close_capture(self):

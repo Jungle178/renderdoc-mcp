@@ -66,3 +66,23 @@ def test_native_python_config_uses_defaults(
     assert config.module_dir == module_dir
     assert config.dll_dir == module_dir
     assert config.python_executable == sys.executable
+
+
+def test_native_python_config_infers_sibling_renderdoc_dll_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_dir = tmp_path / "x64" / "Development"
+    module_dir = build_dir / "pymodules"
+    module_dir.mkdir(parents=True)
+    (module_dir / "renderdoc.pyd").write_bytes(b"")
+    (build_dir / "renderdoc.dll").write_bytes(b"")
+    monkeypatch.setenv("RENDERDOC_NATIVE_MODULE_DIR", str(module_dir))
+    monkeypatch.delenv("RENDERDOC_NATIVE_DLL_DIR", raising=False)
+    monkeypatch.delenv("RENDERDOC_NATIVE_PYTHON_EXE", raising=False)
+
+    config = resolve_native_python_config()
+
+    assert config.module_dir == module_dir
+    assert config.dll_dir == build_dir
+    assert config.python_executable == sys.executable
