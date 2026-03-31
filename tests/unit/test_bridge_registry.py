@@ -27,6 +27,7 @@ def test_bridge_client_registers_v2_handler_registry() -> None:
         "get_analysis_worklist",
         "list_pipeline_bindings",
         "get_shader_code_chunk",
+        "trace_bad_pixel",
         "start_pixel_shader_debug",
         "continue_shader_debug",
         "get_shader_debug_step",

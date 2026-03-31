@@ -121,6 +121,31 @@ def get_pass_summary(analysis_cache, pass_id):
     return pass_summary(pass_payload)
 
 
+def get_innermost_pass_for_event(analysis_cache, event_id):
+    normalized_event_id = int(event_id)
+    matches = []
+
+    for pass_payload in analysis_cache.get("all_passes", []):
+        event_range = pass_payload.get("event_range", {})
+        start_event_id = int(event_range.get("start_event_id", 0))
+        end_event_id = int(event_range.get("end_event_id", 0))
+        if start_event_id <= normalized_event_id <= end_event_id:
+            matches.append(pass_payload)
+
+    if not matches:
+        return None
+
+    matches.sort(
+        key=lambda item: (
+            int(item["event_range"]["end_event_id"]) - int(item["event_range"]["start_event_id"]),
+            -int(item.get("level", 0)),
+            int(item["event_range"]["start_event_id"]),
+            str(item["pass_id"]),
+        )
+    )
+    return matches[0]
+
+
 def pass_id_from_range(start_event_id, end_event_id):
     return "pass:{0}-{1}".format(int(start_event_id), int(end_event_id))
 

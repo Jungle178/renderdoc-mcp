@@ -443,6 +443,7 @@ class BridgeClient(object):
         self._list_resource_usages = self.resource_ops._list_resource_usages
         self._get_pixel_history = self.resource_ops._get_pixel_history
         self._debug_pixel = self.resource_ops._debug_pixel
+        self._trace_bad_pixel = self.resource_ops._trace_bad_pixel
         self._get_texture_data = self.resource_ops._get_texture_data
         self._get_buffer_data = self.resource_ops._get_buffer_data
         self._save_texture_to_file = self.resource_ops._save_texture_to_file
@@ -2217,6 +2218,423 @@ class BridgeClient(object):
             "usage_event_count": payload.get("usage_event_count", 0),
             "draw_count": len(ordered),
             "draws": ordered,
+        }
+
+    def _capture_shader_debugging_supported(self):
+        self._ensure_capture_loaded()
+        payload = {"supported": False}
+
+        def callback(controller):
+            payload["supported"] = self._controller_shader_debugging_supported(controller)
+
+        self.ctx.Replay().BlockInvoke(callback)
+        return bool(payload["supported"])
+
+    def _trace_bad_pixel_reference(
+        self,
+        kind,
+        label=None,
+        summary=None,
+        event_id=None,
+        pass_id=None,
+        resource_id=None,
+        identifier=None,
+    ):
+        payload = {"kind": str(kind)}
+        if label:
+            payload["label"] = str(label)
+        if summary:
+            payload["summary"] = str(summary)
+        if event_id is not None:
+            payload["event_id"] = int(event_id)
+        if pass_id:
+            payload["pass_id"] = str(pass_id)
+        if resource_id:
+            payload["resource_id"] = str(resource_id)
+
+        value = identifier
+        if value is None:
+            if pass_id:
+                value = str(pass_id)
+            elif resource_id:
+                value = str(resource_id)
+            elif event_id is not None:
+                value = int(event_id)
+        if value is not None:
+            payload["id"] = value
+        return payload
+
+    def _trace_bad_pixel_action_summary(self, event_id):
+        if event_id is None:
+            return None
+        payload = (self._get_action_summary(int(event_id)) or {}).get("action")
+        if not isinstance(payload, dict):
+            return None
+        return dict(payload)
+
+    def _trace_bad_pixel_pass_summary(self, analysis, event_id):
+        if analysis is None or event_id is None:
+            return None
+        pass_payload = frame_analysis.get_innermost_pass_for_event(analysis, int(event_id))
+        if pass_payload is None:
+            return None
+        return frame_analysis.pass_summary(pass_payload)
+
+    def _trace_bad_pixel_pipeline_payload(self, event_id):
+        if event_id is None:
+            return {
+                "available": False,
+                "reason": "No primary event was identified for pipeline inspection.",
+                "event_id": None,
+            }
+
+        try:
+            overview = self._get_pipeline_overview(int(event_id))
+        except BridgeError as exc:
+            return {
+                "available": False,
+                "reason": str(exc.message),
+                "event_id": int(event_id),
+            }
+
+        pipeline = dict((overview or {}).get("pipeline") or {})
+        return {
+            "available": bool(pipeline.get("available", False)),
+            "reason": str(pipeline.get("reason", "")),
+            "event_id": int((overview or {}).get("event_id", event_id)),
+            "api": str((overview or {}).get("api", "")),
+            "action": dict((overview or {}).get("action") or {}),
+            "topology": str(pipeline.get("topology", "Unknown")),
+            "graphics_pipeline_object": str(pipeline.get("graphics_pipeline_object", "")),
+            "compute_pipeline_object": str(pipeline.get("compute_pipeline_object", "")),
+            "counts": dict(pipeline.get("counts") or {}),
+            "shaders": list(pipeline.get("shaders") or []),
+            "api_details_available": bool(pipeline.get("api_details_available", False)),
+            "api_details_api": str(pipeline.get("api_details_api", "")),
+        }
+
+    def _trace_bad_pixel_shader_debug_reason(self, code, message):
+        normalized_code = str(code or "")
+        normalized_message = str(message or "").strip().lower()
+        if normalized_code == "shader_debugging_not_supported":
+            return "not_supported"
+        if normalized_code == "shader_debug_requires_draw_event":
+            return "not_draw"
+        if normalized_code == "shader_debug_target_mismatch":
+            return "target_mismatch"
+        if "no pixel shader is bound" in normalized_message:
+            return "no_pixel_shader"
+        if normalized_code == "shader_debug_trace_unavailable":
+            return "trace_unavailable"
+        return "trace_unavailable"
+
+    def _trace_bad_pixel_shader_debug(self, event_id, action_summary, texture_id, x, y, sample):
+        payload = {
+            "used": False,
+            "attempted": False,
+            "reason": "",
+            "event_id": int(event_id) if event_id is not None else None,
+            "shader": None,
+            "target": None,
+            "trace_summary": None,
+            "first_state": None,
+        }
+
+        if event_id is None:
+            payload["reason"] = "no_final_writer"
+            return payload
+
+        flags = set((action_summary or {}).get("flags") or [])
+        if "draw" not in flags:
+            payload["reason"] = "not_draw"
+            return payload
+
+        if not self._capture_shader_debugging_supported():
+            payload["reason"] = "not_supported"
+            return payload
+
+        started = None
+        payload["attempted"] = True
+        try:
+            started = self._start_pixel_shader_debug(
+                int(event_id),
+                int(x),
+                int(y),
+                texture_id,
+                int(sample),
+                None,
+                None,
+                1,
+            )
+            states = list(started.get("states") or [])
+            payload.update(
+                {
+                    "used": True,
+                    "reason": "",
+                    "shader": dict(started.get("shader") or {}),
+                    "target": dict(started.get("target") or {}),
+                    "trace_summary": dict(started.get("trace_summary") or {}),
+                    "first_state": dict(states[0]) if states else None,
+                }
+            )
+        except BridgeError as exc:
+            payload["reason"] = self._trace_bad_pixel_shader_debug_reason(exc.code, exc.message)
+            payload["error_code"] = str(exc.code)
+        finally:
+            shader_debug_id = str((started or {}).get("shader_debug_id", "") or "")
+            if shader_debug_id:
+                try:
+                    self._end_shader_debug(shader_debug_id)
+                except Exception:
+                    pass
+
+        return payload
+
+    def _trace_bad_pixel(self, texture_id, x, y, mip_level, array_slice, sample):
+        payload = self._pixel_history_payload(texture_id, x, y, mip_level, array_slice, sample)
+        modifications = list(payload.get("modifications", []))
+        latest_attempt = modifications[-1] if modifications else None
+        final_writer = None
+        for item in reversed(modifications):
+            if bool(item.get("passed", False)):
+                final_writer = item
+                break
+
+        primary_event_id = None
+        visible_source_event_id = None
+        if latest_attempt is not None:
+            primary_event_id = int(latest_attempt["event_id"])
+            if bool(latest_attempt.get("passed", False)):
+                visible_source_event_id = primary_event_id
+            elif final_writer is not None:
+                visible_source_event_id = int(final_writer["event_id"])
+
+        if latest_attempt is None:
+            conclusion = {
+                "category": "no_modifications",
+                "summary": "RenderDoc reported no pixel-history modifications for this pixel.",
+                "confidence": 1.0,
+            }
+        elif bool(latest_attempt.get("passed", False)):
+            conclusion = {
+                "category": "final_writer",
+                "summary": "The visible value at this pixel was last written by event {0} ({1}).".format(
+                    int(latest_attempt["event_id"]),
+                    latest_attempt.get("action", {}).get("name", "Event {0}".format(int(latest_attempt["event_id"]))),
+                ),
+                "confidence": 0.95,
+            }
+        else:
+            failed_tests = list(latest_attempt.get("failed_tests") or [])
+            if final_writer is not None:
+                conclusion = {
+                    "category": "blocked_write",
+                    "summary": "The most recent write attempt came from event {0} ({1}) but failed {2}, so the visible value comes from earlier event {3} ({4}).".format(
+                        int(latest_attempt["event_id"]),
+                        latest_attempt.get("action", {}).get("name", "Event {0}".format(int(latest_attempt["event_id"]))),
+                        ", ".join(failed_tests) or "pixel tests",
+                        int(final_writer["event_id"]),
+                        final_writer.get("action", {}).get("name", "Event {0}".format(int(final_writer["event_id"]))),
+                    ),
+                    "confidence": 0.9,
+                }
+            else:
+                conclusion = {
+                    "category": "blocked_write",
+                    "summary": "The most recent write attempt came from event {0} ({1}) but failed {2}, and pixel history did not report a successful writer for the visible value.".format(
+                        int(latest_attempt["event_id"]),
+                        latest_attempt.get("action", {}).get("name", "Event {0}".format(int(latest_attempt["event_id"]))),
+                        ", ".join(failed_tests) or "pixel tests",
+                    ),
+                    "confidence": 0.75,
+                }
+
+        analysis = self._ensure_frame_analysis() if primary_event_id is not None or visible_source_event_id is not None else None
+        primary_event = self._trace_bad_pixel_action_summary(primary_event_id)
+        visible_source_event = self._trace_bad_pixel_action_summary(visible_source_event_id)
+        primary_pass = self._trace_bad_pixel_pass_summary(analysis, primary_event_id)
+        visible_source_pass = self._trace_bad_pixel_pass_summary(analysis, visible_source_event_id)
+        pipeline = self._trace_bad_pixel_pipeline_payload(primary_event_id)
+        shader_debug = self._trace_bad_pixel_shader_debug(
+            visible_source_event_id,
+            visible_source_event,
+            texture_id,
+            x,
+            y,
+            sample,
+        )
+
+        history_summary = {
+            "usage_event_count": int(payload.get("usage_event_count", 0)),
+            "total_modification_count": len(modifications),
+            "draw_count": len({int(item["event_id"]) for item in modifications}),
+            "latest_attempt_event_id": primary_event_id,
+            "final_writer_event_id": visible_source_event_id,
+        }
+
+        key_evidence = [
+            self._trace_bad_pixel_reference(
+                "pixel_history",
+                summary="Found {0} pixel-history modification(s) across {1} event(s).".format(
+                    history_summary["total_modification_count"],
+                    history_summary["draw_count"],
+                ),
+                resource_id=str(texture_id),
+            )
+        ]
+        if latest_attempt is not None:
+            attempt_summary = "Latest attempt from event {0} ({1}) {2}.".format(
+                int(latest_attempt["event_id"]),
+                latest_attempt.get("action", {}).get("name", "Event {0}".format(int(latest_attempt["event_id"]))),
+                "passed" if bool(latest_attempt.get("passed", False)) else "failed {}".format(
+                    ", ".join(latest_attempt.get("failed_tests") or []) or "pixel tests"
+                ),
+            )
+            key_evidence.append(
+                self._trace_bad_pixel_reference(
+                    "latest_attempt",
+                    summary=attempt_summary,
+                    event_id=int(latest_attempt["event_id"]),
+                )
+            )
+        if final_writer is not None and int(final_writer["event_id"]) != primary_event_id:
+            key_evidence.append(
+                self._trace_bad_pixel_reference(
+                    "final_writer",
+                    summary="The visible value comes from event {0} ({1}).".format(
+                        int(final_writer["event_id"]),
+                        final_writer.get("action", {}).get("name", "Event {0}".format(int(final_writer["event_id"]))),
+                    ),
+                    event_id=int(final_writer["event_id"]),
+                )
+            )
+        if primary_pass is not None:
+            key_evidence.append(
+                self._trace_bad_pixel_reference(
+                    "primary_pass",
+                    summary="Primary event maps to pass {0}.".format(primary_pass["name"]),
+                    pass_id=primary_pass["pass_id"],
+                )
+            )
+        if shader_debug.get("used", False):
+            first_state = shader_debug.get("first_state") or {}
+            key_evidence.append(
+                self._trace_bad_pixel_reference(
+                    "shader_debug",
+                    summary="Auto shader debug captured step {0} at instruction {1}.".format(
+                        int(first_state.get("step_index", 0)),
+                        int(first_state.get("next_instruction", 0)),
+                    ),
+                    event_id=shader_debug.get("event_id"),
+                )
+            )
+
+        breadcrumb = [
+            self._trace_bad_pixel_reference(
+                "texture",
+                label=(payload.get("texture") or {}).get("name", str(texture_id)),
+                resource_id=str(texture_id),
+            )
+        ]
+        if visible_source_pass is not None:
+            breadcrumb.append(
+                self._trace_bad_pixel_reference(
+                    "visible_source_pass",
+                    label=visible_source_pass["name"],
+                    pass_id=visible_source_pass["pass_id"],
+                )
+            )
+        if visible_source_event is not None:
+            breadcrumb.append(
+                self._trace_bad_pixel_reference(
+                    "visible_source_event",
+                    label=visible_source_event["name"],
+                    event_id=visible_source_event["event_id"],
+                )
+            )
+        if primary_pass is not None and (visible_source_pass is None or primary_pass["pass_id"] != visible_source_pass["pass_id"]):
+            breadcrumb.append(
+                self._trace_bad_pixel_reference(
+                    "primary_pass",
+                    label=primary_pass["name"],
+                    pass_id=primary_pass["pass_id"],
+                )
+            )
+        if primary_event is not None and (
+            visible_source_event is None or primary_event["event_id"] != visible_source_event["event_id"]
+        ):
+            breadcrumb.append(
+                self._trace_bad_pixel_reference(
+                    "primary_event",
+                    label=primary_event["name"],
+                    event_id=primary_event["event_id"],
+                )
+            )
+
+        related_ids = {
+            "texture_id": str(texture_id),
+            "primary_event_id": primary_event_id,
+            "visible_source_event_id": visible_source_event_id,
+            "primary_pass_id": primary_pass["pass_id"] if primary_pass is not None else None,
+            "visible_source_pass_id": visible_source_pass["pass_id"] if visible_source_pass is not None else None,
+            "latest_attempt_event_id": primary_event_id,
+            "final_writer_event_id": visible_source_event_id,
+        }
+
+        pixel_call_arguments = {
+            "texture_id": str(texture_id),
+            "x": int(x),
+            "y": int(y),
+            "mip_level": int(mip_level),
+            "array_slice": int(array_slice),
+            "sample": int(sample),
+        }
+        recommended_calls = [
+            {"tool": "renderdoc_get_pixel_history", "arguments": dict(pixel_call_arguments)}
+        ]
+        if primary_event_id is not None:
+            recommended_calls.append(
+                {"tool": "renderdoc_get_action_summary", "arguments": {"event_id": int(primary_event_id)}}
+            )
+            recommended_calls.append(
+                {"tool": "renderdoc_get_pipeline_overview", "arguments": {"event_id": int(primary_event_id)}}
+            )
+        if primary_pass is not None:
+            recommended_calls.append(
+                {"tool": "renderdoc_get_pass_summary", "arguments": {"pass_id": primary_pass["pass_id"]}}
+            )
+        if not shader_debug.get("used", False) and visible_source_event_id is not None and visible_source_event is not None:
+            if "draw" in set(visible_source_event.get("flags") or []):
+                recommended_calls.append(
+                    {
+                        "tool": "renderdoc_start_pixel_shader_debug",
+                        "arguments": {
+                            "event_id": int(visible_source_event_id),
+                            "texture_id": str(texture_id),
+                            "x": int(x),
+                            "y": int(y),
+                            "sample": int(sample),
+                            "state_limit": 1,
+                        },
+                    }
+                )
+
+        return {
+            "query": dict(payload.get("query") or {}),
+            "texture": dict(payload.get("texture") or {}),
+            "conclusion": conclusion,
+            "history_summary": history_summary,
+            "primary_event": primary_event,
+            "visible_source_event": visible_source_event,
+            "primary_pass": primary_pass,
+            "visible_source_pass": visible_source_pass,
+            "pipeline": pipeline,
+            "shader_debug": shader_debug,
+            "key_evidence": key_evidence,
+            "breadcrumb": breadcrumb,
+            "related_ids": related_ids,
+            "recommended_calls": recommended_calls,
+            "meta": {"auto_shader_debug_attempted": bool(shader_debug.get("attempted", False))},
         }
 
     def _get_texture_data(self, texture_id, mip_level, x, y, width, height, array_slice, sample):

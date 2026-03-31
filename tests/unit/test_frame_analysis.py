@@ -143,6 +143,33 @@ def test_list_passes_can_drill_into_parent_pass_id() -> None:
     assert {item["name"] for item in scene_children["passes"]} == {"ShadowDepths", "BasePass"}
 
 
+def test_get_innermost_pass_for_event_prefers_smallest_nested_range() -> None:
+    nodes = [
+        _action(
+            10,
+            "Scene",
+            ["push_marker"],
+            children=[
+                _action(
+                    20,
+                    "BasePass",
+                    ["push_marker"],
+                    children=[
+                        _action(30, "Opaque", ["push_marker"], children=[_action(31, "Draw", ["draw"])]),
+                    ],
+                ),
+            ],
+        )
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    matched = frame_analysis.get_innermost_pass_for_event(analysis, 31)
+
+    assert matched is not None
+    assert matched["name"] == "Opaque"
+    assert matched["pass_id"] == "pass:30-31"
+
+
 def test_list_actions_returns_direct_children_only() -> None:
     nodes = [
         _action(

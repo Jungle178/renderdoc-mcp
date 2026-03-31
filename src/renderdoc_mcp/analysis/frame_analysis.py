@@ -21,6 +21,7 @@ from .models import (
 from .pass_classification import (
     action_summary,
     build_frame_analysis,
+    get_innermost_pass_for_event,
     compact_action_entry,
     get_pass_details,
     get_pass_summary,
@@ -55,6 +56,7 @@ __all__ = [
     "build_resource_usage_overview",
     "build_timing_result",
     "compact_action_entry",
+    "get_innermost_pass_for_event",
     "get_pass_details",
     "get_pass_summary",
     "list_resource_usages",

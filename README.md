@@ -44,6 +44,7 @@ This repository now exposes an AI-first v2 MCP surface:
 - `renderdoc_list_resource_usages`
 - `renderdoc_get_pixel_history`
 - `renderdoc_debug_pixel`
+- `renderdoc_trace_bad_pixel`
 - `renderdoc_start_pixel_shader_debug`
 - `renderdoc_continue_shader_debug`
 - `renderdoc_get_shader_debug_step`
@@ -237,6 +238,17 @@ renderdoc_get_buffer_data(
 Pixel debugging tools are still available:
 
 ```powershell
+renderdoc_trace_bad_pixel(
+  capture_id="<capture_id>",
+  texture_id="ResourceId::123",
+  x=512,
+  y=384
+)
+```
+
+`renderdoc_trace_bad_pixel` is the recommended first call for "why is this pixel wrong?" because it stitches together pixel history, the most relevant events and passes, pipeline context, and a best-effort one-step shader debug when supported.
+
+```powershell
 renderdoc_get_pixel_history(
   capture_id="<capture_id>",
   texture_id="ResourceId::123",
@@ -255,7 +267,7 @@ renderdoc_debug_pixel(
 )
 ```
 
-`renderdoc_debug_pixel` remains a compact pixel-history summary. For actual RenderDoc pixel shader single-step debugging, use the session-based tools when `capabilities.shader_debugging` is `true`:
+`renderdoc_debug_pixel` remains a compact low-level pixel-history summary. For actual RenderDoc pixel shader single-step debugging, use the session-based tools when `capabilities.shader_debugging` is `true`:
 
 ```powershell
 renderdoc_start_pixel_shader_debug(
@@ -402,6 +414,7 @@ uv run renderdoc-mcp
 - `renderdoc_list_resource_usages`
 - `renderdoc_get_pixel_history`
 - `renderdoc_debug_pixel`
+- `renderdoc_trace_bad_pixel`
 - `renderdoc_start_pixel_shader_debug`
 - `renderdoc_continue_shader_debug`
 - `renderdoc_get_shader_debug_step`

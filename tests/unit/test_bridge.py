@@ -387,6 +387,184 @@ def test_bridge_client_detects_shader_debugging_support() -> None:
     assert client._controller_shader_debugging_supported(client.ctx.controller) is True
 
 
+def test_bridge_client_trace_bad_pixel_handles_empty_history(monkeypatch) -> None:
+    client = BridgeClient(FakeContext(FakeController()))
+    monkeypatch.setattr(
+        client,
+        "_pixel_history_payload",
+        lambda texture_id, x, y, mip_level, array_slice, sample: {
+            "query": {"texture_id": texture_id, "x": x, "y": y, "mip_level": mip_level, "array_slice": array_slice, "sample": sample},
+            "texture": {"resource_id": texture_id, "name": "SceneColor"},
+            "usage_event_count": 0,
+            "modifications": [],
+        },
+    )
+
+    response = client._trace_bad_pixel("tex-1", 4, 5, 0, 0, 0)
+
+    assert response["conclusion"]["category"] == "no_modifications"
+    assert response["primary_event"] is None
+    assert response["visible_source_event"] is None
+    assert response["related_ids"]["primary_event_id"] is None
+    assert response["shader_debug"]["reason"] == "no_final_writer"
+    assert response["recommended_calls"][0]["tool"] == "renderdoc_get_pixel_history"
+
+
+def test_bridge_client_trace_bad_pixel_uses_latest_successful_writer(monkeypatch) -> None:
+    client = BridgeClient(FakeContext(FakeController()))
+    monkeypatch.setattr(
+        client,
+        "_pixel_history_payload",
+        lambda texture_id, x, y, mip_level, array_slice, sample: {
+            "query": {"texture_id": texture_id, "x": x, "y": y, "mip_level": mip_level, "array_slice": array_slice, "sample": sample},
+            "texture": {"resource_id": texture_id, "name": "SceneColor"},
+            "usage_event_count": 2,
+            "modifications": [
+                {"event_id": 20, "action": {"name": "BasePass"}, "passed": True, "failed_tests": []},
+            ],
+        },
+    )
+    monkeypatch.setattr(client, "_ensure_frame_analysis", lambda: {})
+    monkeypatch.setattr(
+        client,
+        "_trace_bad_pixel_action_summary",
+        lambda event_id: {"event_id": event_id, "name": "BasePass", "flags": ["draw"], "resource_usage_summary": {"output_count": 1}},
+    )
+    monkeypatch.setattr(
+        client,
+        "_trace_bad_pixel_pass_summary",
+        lambda analysis, event_id: {"pass_id": "pass:20-20", "name": "BasePass"},
+    )
+    monkeypatch.setattr(
+        client,
+        "_trace_bad_pixel_pipeline_payload",
+        lambda event_id: {"available": True, "reason": "", "event_id": event_id},
+    )
+    monkeypatch.setattr(
+        client,
+        "_trace_bad_pixel_shader_debug",
+        lambda event_id, action_summary, texture_id, x, y, sample: {
+            "used": False,
+            "attempted": False,
+            "reason": "not_supported",
+            "event_id": event_id,
+        },
+    )
+
+    response = client._trace_bad_pixel("tex-1", 4, 5, 0, 0, 0)
+
+    assert response["conclusion"]["category"] == "final_writer"
+    assert response["primary_event"]["event_id"] == 20
+    assert response["visible_source_event"]["event_id"] == 20
+    assert response["related_ids"]["primary_pass_id"] == "pass:20-20"
+    assert response["recommended_calls"][-1]["tool"] == "renderdoc_start_pixel_shader_debug"
+    assert response["recommended_calls"][-1]["arguments"]["event_id"] == 20
+
+
+def test_bridge_client_trace_bad_pixel_prefers_earlier_visible_writer_when_latest_attempt_failed(monkeypatch) -> None:
+    client = BridgeClient(FakeContext(FakeController()))
+    shader_debug_calls = []
+    monkeypatch.setattr(
+        client,
+        "_pixel_history_payload",
+        lambda texture_id, x, y, mip_level, array_slice, sample: {
+            "query": {"texture_id": texture_id, "x": x, "y": y, "mip_level": mip_level, "array_slice": array_slice, "sample": sample},
+            "texture": {"resource_id": texture_id, "name": "SceneColor"},
+            "usage_event_count": 2,
+            "modifications": [
+                {"event_id": 10, "action": {"name": "BasePass"}, "passed": True, "failed_tests": []},
+                {
+                    "event_id": 20,
+                    "action": {"name": "OverlayPass"},
+                    "passed": False,
+                    "failed_tests": ["depth_test_failed"],
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(client, "_ensure_frame_analysis", lambda: {})
+    monkeypatch.setattr(
+        client,
+        "_trace_bad_pixel_action_summary",
+        lambda event_id: {
+            "event_id": event_id,
+            "name": "BasePass" if event_id == 10 else "OverlayPass",
+            "flags": ["draw"],
+            "resource_usage_summary": {"output_count": 1},
+        },
+    )
+    monkeypatch.setattr(
+        client,
+        "_trace_bad_pixel_pass_summary",
+        lambda analysis, event_id: {"pass_id": "pass:{0}-{0}".format(event_id), "name": "Pass {0}".format(event_id)},
+    )
+    monkeypatch.setattr(
+        client,
+        "_trace_bad_pixel_pipeline_payload",
+        lambda event_id: {"available": True, "reason": "", "event_id": event_id},
+    )
+    monkeypatch.setattr(
+        client,
+        "_trace_bad_pixel_shader_debug",
+        lambda event_id, action_summary, texture_id, x, y, sample: shader_debug_calls.append(event_id)
+        or {"used": False, "attempted": False, "reason": "not_supported", "event_id": event_id},
+    )
+
+    response = client._trace_bad_pixel("tex-1", 4, 5, 0, 0, 0)
+
+    assert response["conclusion"]["category"] == "blocked_write"
+    assert response["primary_event"]["event_id"] == 20
+    assert response["visible_source_event"]["event_id"] == 10
+    assert response["history_summary"]["final_writer_event_id"] == 10
+    assert shader_debug_calls == [10]
+
+
+def test_bridge_client_trace_bad_pixel_shader_debug_returns_first_state_and_closes_session(monkeypatch) -> None:
+    client = BridgeClient(FakeContext(FakeController()))
+    ended = {}
+    monkeypatch.setattr(client, "_capture_shader_debugging_supported", lambda: True)
+    monkeypatch.setattr(
+        client,
+        "_start_pixel_shader_debug",
+        lambda event_id, x, y, texture_id, sample, primitive_id, view, state_limit: {
+            "shader_debug_id": "debug-1",
+            "shader": {"stage": "Pixel", "shader_id": "shader-1"},
+            "target": {"texture_id": texture_id, "validated": True},
+            "trace_summary": {"instruction_count": 3},
+            "states": [
+                {
+                    "step_index": 0,
+                    "next_instruction": 1,
+                    "flags": [],
+                    "line_info": {"line_start": 12},
+                    "source_variable_names": ["color"],
+                    "change_count": 1,
+                    "has_callstack": False,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(client, "_end_shader_debug", lambda shader_debug_id: ended.setdefault("shader_debug_id", shader_debug_id))
+
+    response = client._trace_bad_pixel_shader_debug(7, {"flags": ["draw"]}, "tex-1", 4, 5, 0)
+
+    assert response["used"] is True
+    assert response["first_state"]["step_index"] == 0
+    assert response["target"]["validated"] is True
+    assert ended["shader_debug_id"] == "debug-1"
+
+
+def test_bridge_client_trace_bad_pixel_shader_debug_skips_when_shader_debugging_is_unavailable(monkeypatch) -> None:
+    client = BridgeClient(FakeContext(FakeController()))
+    monkeypatch.setattr(client, "_capture_shader_debugging_supported", lambda: False)
+
+    response = client._trace_bad_pixel_shader_debug(7, {"flags": ["draw"]}, "tex-1", 4, 5, 0)
+
+    assert response["used"] is False
+    assert response["attempted"] is False
+    assert response["reason"] == "not_supported"
+
+
 def test_bridge_client_start_pixel_shader_debug_requires_draw_event(monkeypatch) -> None:
     controller = FakeController(state=FakeState(shader_bound=True), shader_debugging=True)
     client = BridgeClient(FakeContext(controller))

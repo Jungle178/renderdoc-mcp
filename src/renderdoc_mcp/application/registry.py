@@ -132,6 +132,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         lambda application: application.resources.renderdoc_debug_pixel,
     ),
     ToolSpec(
+        "renderdoc_trace_bad_pixel",
+        "Explain why a texture pixel ended up with its current value by following pixel history, pipeline state, and optional shader debug evidence.",
+        "trace_bad_pixel",
+        lambda application: application.resources.renderdoc_trace_bad_pixel,
+    ),
+    ToolSpec(
         "renderdoc_start_pixel_shader_debug",
         "Start a pixel shader debugging session for a draw event and pixel co-ordinate.",
         "start_pixel_shader_debug",

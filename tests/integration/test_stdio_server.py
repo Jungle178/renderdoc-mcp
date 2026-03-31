@@ -67,6 +67,7 @@ def test_stdio_tools_and_resources() -> None:
                     "renderdoc_list_resource_usages",
                     "renderdoc_get_pixel_history",
                     "renderdoc_debug_pixel",
+                    "renderdoc_trace_bad_pixel",
                     "renderdoc_start_pixel_shader_debug",
                     "renderdoc_continue_shader_debug",
                     "renderdoc_get_shader_debug_step",
@@ -353,6 +354,24 @@ def test_stdio_tools_and_resources() -> None:
                         },
                     )
                     assert not pixel_debug.isError
+
+                    pixel_trace = await session.call_tool(
+                        "renderdoc_trace_bad_pixel",
+                        {
+                            "capture_id": capture_id,
+                            "texture_id": first_texture["resource_id"],
+                            "x": 0,
+                            "y": 0,
+                        },
+                    )
+                    assert not pixel_trace.isError
+                    trace_payload = pixel_trace.structuredContent
+                    assert "conclusion" in trace_payload
+                    assert "key_evidence" in trace_payload
+                    assert "breadcrumb" in trace_payload
+                    assert "related_ids" in trace_payload
+                    if trace_payload["primary_event"] is not None:
+                        assert trace_payload["related_ids"]["primary_event_id"] == trace_payload["primary_event"]["event_id"]
 
                     texture_preview = await session.call_tool(
                         "renderdoc_get_texture_data",

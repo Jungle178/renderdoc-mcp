@@ -296,6 +296,45 @@ class DummyBridge:
             }
         if method == "debug_pixel":
             return {"texture": {"resource_id": payload["texture_id"]}, "draws": [], "meta": {}}
+        if method == "trace_bad_pixel":
+            return {
+                "query": {
+                    "texture_id": payload["texture_id"],
+                    "x": payload["x"],
+                    "y": payload["y"],
+                    "mip_level": payload["mip_level"],
+                    "array_slice": payload["array_slice"],
+                    "sample": payload["sample"],
+                },
+                "texture": {"resource_id": payload["texture_id"]},
+                "conclusion": {"category": "no_modifications", "summary": "No modifications.", "confidence": 1.0},
+                "history_summary": {
+                    "usage_event_count": 0,
+                    "total_modification_count": 0,
+                    "draw_count": 0,
+                    "latest_attempt_event_id": None,
+                    "final_writer_event_id": None,
+                },
+                "primary_event": None,
+                "visible_source_event": None,
+                "primary_pass": None,
+                "visible_source_pass": None,
+                "pipeline": {"available": False, "reason": "No primary event was identified for pipeline inspection."},
+                "shader_debug": {"used": False, "attempted": False, "reason": "no_final_writer", "event_id": None},
+                "key_evidence": [],
+                "breadcrumb": [],
+                "related_ids": {
+                    "texture_id": payload["texture_id"],
+                    "primary_event_id": None,
+                    "visible_source_event_id": None,
+                    "primary_pass_id": None,
+                    "visible_source_pass_id": None,
+                    "latest_attempt_event_id": None,
+                    "final_writer_event_id": None,
+                },
+                "recommended_calls": [{"tool": "renderdoc_get_pixel_history", "arguments": {"texture_id": payload["texture_id"]}}],
+                "meta": {},
+            }
         if method == "start_pixel_shader_debug":
             return {
                 "shader_debug_id": "debug-1",
@@ -484,6 +523,36 @@ def test_buffer_resource_usage_surface_reports_unsupported(tmp_path: Path) -> No
     assert exc_info.value.code == "resource_usage_unsupported"
 
 
+def test_trace_bad_pixel_handler_normalizes_and_forwards_arguments(tmp_path: Path) -> None:
+    application, created = _application()
+    capture_path = _capture(tmp_path)
+    opened = application.captures.renderdoc_open_capture(capture_path)
+
+    traced = application.resources.renderdoc_trace_bad_pixel(
+        opened["capture_id"],
+        " ResourceId::123 ",
+        x="3",
+        y="4",
+        mip_level="1",
+        array_slice="2",
+        sample="0",
+    )
+
+    assert traced["conclusion"]["category"] == "no_modifications"
+    assert traced["meta"]["backend"] == "qrenderdoc"
+    assert created[0].calls[-1] == (
+        "trace_bad_pixel",
+        {
+            "texture_id": "ResourceId::123",
+            "x": 3,
+            "y": 4,
+            "mip_level": 1,
+            "array_slice": 2,
+            "sample": 0,
+        },
+    )
+
+
 def test_shader_debug_handlers_normalize_and_forward_arguments(tmp_path: Path) -> None:
     application, created = _application()
     capture_path = _capture(tmp_path)
@@ -551,6 +620,7 @@ def test_registry_contains_new_breaking_api_surface() -> None:
         "renderdoc_get_pipeline_overview",
         "renderdoc_get_shader_code_chunk",
         "renderdoc_list_resource_usages",
+        "renderdoc_trace_bad_pixel",
         "renderdoc_start_pixel_shader_debug",
         "renderdoc_continue_shader_debug",
         "renderdoc_get_shader_debug_step",

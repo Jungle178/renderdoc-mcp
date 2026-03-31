@@ -172,6 +172,20 @@ class ResourceHandlers:
         session, result = self.context.capture_tool(capture_id, "debug_pixel", params)
         return attach_capture(ensure_meta(result), session)
 
+    def renderdoc_trace_bad_pixel(
+        self,
+        capture_id: str,
+        texture_id: str,
+        x: int,
+        y: int,
+        mip_level: int | None = 0,
+        array_slice: int | None = 0,
+        sample: int | None = 0,
+    ) -> dict[str, Any]:
+        params = self._normalize_pixel_params(texture_id, x, y, mip_level, array_slice, sample)
+        session, result = self.context.capture_tool(capture_id, "trace_bad_pixel", params)
+        return attach_capture(ensure_meta(result), session)
+
     def renderdoc_start_pixel_shader_debug(
         self,
         capture_id: str,

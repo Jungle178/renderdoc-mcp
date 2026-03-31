@@ -36,6 +36,14 @@ class ResourceOps(BridgeComponent):
                 int(params.get("array_slice", 0)),
                 int(params.get("sample", 0)),
             ),
+            "trace_bad_pixel": lambda params: self._trace_bad_pixel(
+                params.get("texture_id", ""),
+                int(params.get("x", 0)),
+                int(params.get("y", 0)),
+                int(params.get("mip_level", 0)),
+                int(params.get("array_slice", 0)),
+                int(params.get("sample", 0)),
+            ),
             "get_texture_data": lambda params: self._get_texture_data(
                 params.get("texture_id", ""),
                 int(params.get("mip_level", 0)),
@@ -65,6 +73,9 @@ class ResourceOps(BridgeComponent):
 
     def _debug_pixel(self, texture_id, x, y, mip_level, array_slice, sample):
         return self._call_bridge_client("_debug_pixel", texture_id, x, y, mip_level, array_slice, sample)
+
+    def _trace_bad_pixel(self, texture_id, x, y, mip_level, array_slice, sample):
+        return self._call_bridge_client("_trace_bad_pixel", texture_id, x, y, mip_level, array_slice, sample)
 
     def _get_texture_data(self, texture_id, mip_level, x, y, width, height, array_slice, sample):
         return self._call_bridge_client("_get_texture_data", texture_id, mip_level, x, y, width, height, array_slice, sample)
