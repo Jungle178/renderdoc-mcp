@@ -61,13 +61,7 @@ class ResourceHandlers:
                 "sort_by must be one of name or size.",
                 {"sort_by": normalized_sort_by},
             )
-        if normalized_cursor is not None and normalized_cursor < 0:
-            raise ReplayFailureError("cursor must be greater than or equal to 0.", {"cursor": normalized_cursor})
-        if normalized_limit is not None and (normalized_limit <= 0 or normalized_limit > MAX_PAGE_LIMIT):
-            raise ReplayFailureError(
-                "limit must be between 1 and {}.".format(MAX_PAGE_LIMIT),
-                {"limit": normalized_limit},
-            )
+        self.context.normalizer.validate_pagination(normalized_cursor, normalized_limit, MAX_PAGE_LIMIT)
 
         params: dict[str, Any] = {
             "kind": normalized_kind,
@@ -109,13 +103,7 @@ class ResourceHandlers:
                 "usage_kind must be one of {}.".format(", ".join(sorted(SUPPORTED_RESOURCE_USAGE_KINDS))),
                 {"usage_kind": normalized_usage_kind},
             )
-        if normalized_cursor is not None and normalized_cursor < 0:
-            raise ReplayFailureError("cursor must be greater than or equal to 0.", {"cursor": normalized_cursor})
-        if normalized_limit is not None and (normalized_limit <= 0 or normalized_limit > MAX_PAGE_LIMIT):
-            raise ReplayFailureError(
-                "limit must be between 1 and {}.".format(MAX_PAGE_LIMIT),
-                {"limit": normalized_limit},
-            )
+        self.context.normalizer.validate_pagination(normalized_cursor, normalized_limit, MAX_PAGE_LIMIT)
 
         params: dict[str, Any] = {
             "resource_id": normalized_resource_id,
@@ -143,15 +131,7 @@ class ResourceHandlers:
         params = self._normalize_pixel_params(texture_id, x, y, mip_level, array_slice, sample)
         normalized_cursor = self.context.normalize_optional_int(cursor, "cursor")
         normalized_limit = self.context.normalize_optional_int(limit, "limit")
-        if normalized_cursor is not None and normalized_cursor < 0:
-            raise ReplayFailureError("cursor must be greater than or equal to 0.", {"cursor": normalized_cursor})
-        if normalized_limit is not None and (
-            normalized_limit <= 0 or normalized_limit > MAX_TIMING_EVENT_PAGE_LIMIT
-        ):
-            raise ReplayFailureError(
-                "limit must be between 1 and {}.".format(MAX_TIMING_EVENT_PAGE_LIMIT),
-                {"limit": normalized_limit},
-            )
+        self.context.normalizer.validate_pagination(normalized_cursor, normalized_limit, MAX_TIMING_EVENT_PAGE_LIMIT)
         if normalized_cursor is not None:
             params["cursor"] = normalized_cursor
         params["limit"] = normalized_limit or DEFAULT_PIXEL_HISTORY_LIMIT

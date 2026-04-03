@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-import atexit
 import os
 import subprocess
 import threading
 import time
-import uuid
 from collections import deque
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, TextIO
 
+from renderdoc_mcp._bridge_base import BaseBridge
 from renderdoc_mcp.backend import NATIVE_PYTHON_BACKEND, NativePythonConfig, resolve_native_python_config
 from renderdoc_mcp.errors import (
     BridgeDisconnectedError,
-    CapturePathError,
-    InvalidEventIDError,
     NativeHelperStartupError,
     NativePythonImportError,
     NativePythonModuleNotFoundError,
@@ -25,17 +22,7 @@ from renderdoc_mcp.errors import (
 from renderdoc_mcp.protocol import BRIDGE_PROTOCOL_VERSION, decode_message, send_message
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-class NativePythonBridge:
+class NativePythonBridge(BaseBridge):
     backend_name = NATIVE_PYTHON_BACKEND
 
     def __init__(
@@ -44,78 +31,22 @@ class NativePythonBridge:
         timeout_seconds: float | None = None,
         helper_module: str = "renderdoc_mcp.native_helper",
     ) -> None:
-        self.timeout_seconds = timeout_seconds or _env_float("RENDERDOC_BRIDGE_TIMEOUT_SECONDS", 30.0)
+        super().__init__(timeout_seconds)
         self._config = config
         self._helper_module = helper_module
-        self._lock = threading.RLock()
-        self._process: subprocess.Popen[str] | None = None
-        self._reader: TextIO | None = None
-        self._writer: TextIO | None = None
         self._message_queue: Queue[dict[str, Any] | None] = Queue()
         self._stderr_lines: deque[str] = deque(maxlen=50)
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
-        self._current_capture: str | None = None
-        self._current_capture_token: tuple[int, int] | None = None
-        self.renderdoc_version: str | None = None
-        atexit.register(self.close)
 
-    def close(self) -> None:
-        with self._lock:
-            process = self._process
-            self._process = None
-            self._current_capture = None
-            self._current_capture_token = None
-            self.renderdoc_version = None
-            if self._writer is not None:
-                try:
-                    self._writer.close()
-                except OSError:
-                    pass
-                self._writer = None
-            if self._reader is not None:
-                try:
-                    self._reader.close()
-                except OSError:
-                    pass
-                self._reader = None
-
-            if process is not None:
-                try:
-                    if process.poll() is None:
-                        process.terminate()
-                        try:
-                            process.wait(timeout=5.0)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            try:
-                                process.wait(timeout=1.0)
-                            except subprocess.TimeoutExpired:
-                                pass
-                except OSError:
-                    pass
-
-    def ensure_capture_loaded(self, capture_path: str) -> dict[str, Any]:
-        path = Path(capture_path)
-        normalized = str(path)
-        stat_result = path.stat()
-        capture_token = (
-            int(stat_result.st_size),
-            int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))),
-        )
-        with self._lock:
-            self.ensure_started()
-            if self._current_capture == normalized and self._current_capture_token == capture_token:
-                return {"loaded": True, "filename": normalized}
-            result = self._call_locked("load_capture", {"capture_path": normalized})
-            self._current_capture = normalized
-            self._current_capture_token = capture_token
-            return result
-
-    def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        with self._lock:
-            self.ensure_started()
-            return self._call_locked(method, params or {})
+    def _close_extra_resources(self) -> None:
+        stdout_thread = self._stdout_thread
+        stderr_thread = self._stderr_thread
+        self._stdout_thread = None
+        self._stderr_thread = None
+        for thread in (stdout_thread, stderr_thread):
+            if thread is not None:
+                thread.join(timeout=2.0)
 
     def ensure_started(self) -> None:
         if self._reader is not None and self._writer is not None and self._process is not None:
@@ -263,7 +194,7 @@ class NativePythonBridge:
         if self._reader is None or self._writer is None:
             raise BridgeDisconnectedError()
 
-        request_id = uuid.uuid4().hex
+        request_id = self._new_request_id()
         try:
             send_message(
                 self._writer,
@@ -313,10 +244,6 @@ class NativePythonBridge:
         message = error.get("message", "RenderDoc bridge request failed.")
         details = error.get("details") or {}
 
-        if code == "capture_path_not_found":
-            raise CapturePathError(str(details.get("capture_path", "")))
-        if code == "invalid_event_id":
-            raise InvalidEventIDError(int(details.get("event_id", 0)))
         if code == "native_python_not_configured":
             raise NativePythonNotConfiguredError(str(details.get("missing_env_var", "RENDERDOC_NATIVE_MODULE_DIR")))
         if code == "native_python_module_not_found":
@@ -328,7 +255,4 @@ class NativePythonBridge:
             raise NativePythonImportError(message, details)
         if code == "native_helper_startup_failed":
             raise NativeHelperStartupError(message, details)
-        if code == "bridge_disconnected":
-            self.close()
-            raise BridgeDisconnectedError()
-        raise RenderDocMCPError(str(code or "replay_failure"), message, details)
+        super()._raise_mapped_error(error)

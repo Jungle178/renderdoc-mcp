@@ -138,3 +138,17 @@ class InputNormalizer:
         if normalized <= 0:
             raise ReplayFailureError(f"{field_name} must be greater than 0.", {field_name: normalized})
         return normalized
+
+    def validate_pagination(
+        self,
+        cursor: int | None,
+        limit: int | None,
+        max_limit: int,
+    ) -> None:
+        if cursor is not None and cursor < 0:
+            raise ReplayFailureError("cursor must be greater than or equal to 0.", {"cursor": cursor})
+        if limit is not None and (limit <= 0 or limit > max_limit):
+            raise ReplayFailureError(
+                "limit must be between 1 and {}.".format(max_limit),
+                {"limit": limit},
+            )

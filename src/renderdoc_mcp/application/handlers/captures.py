@@ -66,11 +66,7 @@ class CaptureHandlers:
                 "focus must be one of performance, structure, or resources.",
                 {"focus": normalized_focus},
             )
-        if normalized_limit is not None and (normalized_limit <= 0 or normalized_limit > MAX_WORKLIST_LIMIT):
-            raise ReplayFailureError(
-                "limit must be between 1 and {}.".format(MAX_WORKLIST_LIMIT),
-                {"limit": normalized_limit},
-            )
+        self.context.normalizer.validate_pagination(None, normalized_limit, MAX_WORKLIST_LIMIT)
 
         params = {"focus": normalized_focus, "limit": normalized_limit or DEFAULT_WORKLIST_LIMIT}
         session, result = self.context.capture_tool(capture_id, "get_analysis_worklist", params)
@@ -93,13 +89,7 @@ class CaptureHandlers:
         normalized_name_filter = self.context.normalize_optional_string(name_filter)
         normalized_sort_by = (self.context.normalize_optional_string(sort_by) or "event_order").lower()
 
-        if normalized_cursor is not None and normalized_cursor < 0:
-            raise ReplayFailureError("cursor must be greater than or equal to 0.", {"cursor": normalized_cursor})
-        if normalized_limit is not None and (normalized_limit <= 0 or normalized_limit > MAX_PAGE_LIMIT):
-            raise ReplayFailureError(
-                "limit must be between 1 and {}.".format(MAX_PAGE_LIMIT),
-                {"limit": normalized_limit},
-            )
+        self.context.normalizer.validate_pagination(normalized_cursor, normalized_limit, MAX_PAGE_LIMIT)
         if normalized_category_filter and normalized_category_filter not in SUPPORTED_PASS_CATEGORIES:
             raise ReplayFailureError(
                 "category_filter must be one of {}.".format(", ".join(sorted(SUPPORTED_PASS_CATEGORIES))),
@@ -142,15 +132,7 @@ class CaptureHandlers:
         normalized_limit = self.context.normalize_optional_int(limit, "limit")
         normalized_sort_by = (self.context.normalize_optional_string(sort_by) or "event_order").lower()
 
-        if normalized_cursor is not None and normalized_cursor < 0:
-            raise ReplayFailureError("cursor must be greater than or equal to 0.", {"cursor": normalized_cursor})
-        if normalized_limit is not None and (
-            normalized_limit <= 0 or normalized_limit > MAX_TIMING_EVENT_PAGE_LIMIT
-        ):
-            raise ReplayFailureError(
-                "limit must be between 1 and {}.".format(MAX_TIMING_EVENT_PAGE_LIMIT),
-                {"limit": normalized_limit},
-            )
+        self.context.normalizer.validate_pagination(normalized_cursor, normalized_limit, MAX_TIMING_EVENT_PAGE_LIMIT)
         if normalized_sort_by not in {"event_order", "gpu_time"}:
             raise ReplayFailureError(
                 "sort_by must be one of event_order or gpu_time.",

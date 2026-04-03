@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import logging
 import os
 import threading
 import time
@@ -11,6 +12,8 @@ from typing import Callable, Iterator
 
 from renderdoc_mcp.bridge import RenderDocBridge, create_default_bridge
 from renderdoc_mcp.uri import create_capture_id
+
+logger = logging.getLogger(__name__)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -137,7 +140,7 @@ class CaptureSessionPool:
             try:
                 session.bridge.close()
             except Exception:
-                pass
+                logger.debug("Failed to close bridge for session %s", session.capture_id, exc_info=True)
 
 
 @lru_cache(maxsize=1)

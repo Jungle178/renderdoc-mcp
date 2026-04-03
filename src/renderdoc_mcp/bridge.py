@@ -1,25 +1,19 @@
 from __future__ import annotations
 
-import atexit
 import os
 import secrets
 import socket
 import subprocess
 import tempfile
-import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Protocol, TextIO
 
+from renderdoc_mcp._bridge_base import BaseBridge
 from renderdoc_mcp.backend import DEFAULT_BACKEND, NATIVE_PYTHON_BACKEND, current_backend_name
 from renderdoc_mcp.errors import (
-    BridgeDisconnectedError,
     BridgeHandshakeTimeoutError,
-    CapturePathError,
-    InvalidEventIDError,
     ReplayFailureError,
-    RenderDocMCPError,
 )
 from renderdoc_mcp.paths import resolve_qrenderdoc_path
 from renderdoc_mcp.protocol import BRIDGE_PROTOCOL_VERSION, close_socket, read_message, send_message
@@ -39,93 +33,23 @@ class RenderDocBridge(Protocol):
         ...
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-class QRenderDocBridge:
+class QRenderDocBridge(BaseBridge):
     """Owns the qrenderdoc process handshake and request/response socket."""
 
     backend_name = DEFAULT_BACKEND
 
     def __init__(self, timeout_seconds: float | None = None) -> None:
-        self.timeout_seconds = timeout_seconds or _env_float("RENDERDOC_BRIDGE_TIMEOUT_SECONDS", 30.0)
-        self._lock = threading.RLock()
-        self._process: subprocess.Popen[bytes] | None = None
+        super().__init__(timeout_seconds)
         self._server_socket: socket.socket | None = None
         self._connection: socket.socket | None = None
-        self._reader: TextIO | None = None
-        self._writer: TextIO | None = None
-        self._current_capture: str | None = None
-        self._current_capture_token: tuple[int, int] | None = None
         self._log_path: str | None = None
-        self.renderdoc_version: str | None = None
-        atexit.register(self.close)
 
-    def close(self) -> None:
-        with self._lock:
-            process = self._process
-            self._process = None
-            self._current_capture = None
-            self._current_capture_token = None
-            self.renderdoc_version = None
-            if self._writer is not None:
-                try:
-                    self._writer.close()
-                except OSError:
-                    pass
-                self._writer = None
-            if self._reader is not None:
-                try:
-                    self._reader.close()
-                except OSError:
-                    pass
-                self._reader = None
-            close_socket(self._connection)
-            self._connection = None
-            close_socket(self._server_socket)
-            self._server_socket = None
-            self._log_path = None
-
-            if process is not None:
-                try:
-                    if process.poll() is None:
-                        process.terminate()
-                        try:
-                            process.wait(timeout=5.0)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            try:
-                                process.wait(timeout=1.0)
-                            except subprocess.TimeoutExpired:
-                                pass
-                except OSError:
-                    pass
-
-    def ensure_capture_loaded(self, capture_path: str) -> dict[str, Any]:
-        path = Path(capture_path)
-        normalized = str(path)
-        stat_result = path.stat()
-        capture_token = (int(stat_result.st_size), int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))))
-        with self._lock:
-            self.ensure_started()
-            if self._current_capture == normalized and self._current_capture_token == capture_token:
-                return {"loaded": True, "filename": normalized}
-            result = self._call_locked("load_capture", {"capture_path": normalized})
-            self._current_capture = normalized
-            self._current_capture_token = capture_token
-            return result
-
-    def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        with self._lock:
-            self.ensure_started()
-            return self._call_locked(method, params or {})
+    def _close_extra_resources(self) -> None:
+        close_socket(self._connection)
+        self._connection = None
+        close_socket(self._server_socket)
+        self._server_socket = None
+        self._log_path = None
 
     def ensure_started(self) -> None:
         if self._reader is not None and self._writer is not None and self._connection is not None:
@@ -138,10 +62,14 @@ class QRenderDocBridge:
             self.close()
 
             listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listen_socket.bind(("127.0.0.1", 0))
-            listen_socket.listen(1)
-            listen_socket.settimeout(0.5)
+            try:
+                listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                listen_socket.bind(("127.0.0.1", 0))
+                listen_socket.listen(1)
+                listen_socket.settimeout(0.5)
+            except Exception:
+                listen_socket.close()
+                raise
             self._server_socket = listen_socket
 
             token = secrets.token_urlsafe(24)
@@ -224,10 +152,12 @@ class QRenderDocBridge:
             self.renderdoc_version = None
 
     def _call_locked(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        from renderdoc_mcp.errors import BridgeDisconnectedError
+
         if self._reader is None or self._writer is None:
             raise BridgeDisconnectedError()
 
-        request_id = uuid.uuid4().hex
+        request_id = self._new_request_id()
         try:
             send_message(
                 self._writer,
@@ -257,20 +187,6 @@ class QRenderDocBridge:
         if not isinstance(result, dict):
             raise ReplayFailureError("Bridge response did not include a JSON object result.")
         return result
-
-    def _raise_mapped_error(self, error: dict[str, Any]) -> None:
-        code = error.get("code")
-        message = error.get("message", "RenderDoc bridge request failed.")
-        details = error.get("details")
-
-        if code == "capture_path_not_found":
-            raise CapturePathError(str((details or {}).get("capture_path", "")))
-        if code == "invalid_event_id":
-            raise InvalidEventIDError(int((details or {}).get("event_id", 0)))
-        if code == "bridge_disconnected":
-            self.close()
-            raise BridgeDisconnectedError()
-        raise RenderDocMCPError(str(code or "replay_failure"), message, details)
 
 
 def create_default_bridge() -> RenderDocBridge:

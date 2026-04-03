@@ -87,13 +87,7 @@ class ActionHandlers:
                 "parent_event_id must be greater than 0 when provided.",
                 {"parent_event_id": normalized_parent_event_id},
             )
-        if normalized_cursor is not None and normalized_cursor < 0:
-            raise ReplayFailureError("cursor must be greater than or equal to 0.", {"cursor": normalized_cursor})
-        if normalized_limit is not None and (normalized_limit <= 0 or normalized_limit > MAX_PAGE_LIMIT):
-            raise ReplayFailureError(
-                "limit must be between 1 and {}.".format(MAX_PAGE_LIMIT),
-                {"limit": normalized_limit},
-            )
+        self.context.normalizer.validate_pagination(normalized_cursor, normalized_limit, MAX_PAGE_LIMIT)
 
         params: dict[str, Any] = {"limit": normalized_limit or DEFAULT_ACTION_PAGE_LIMIT}
         if normalized_parent_event_id is not None:
@@ -140,13 +134,7 @@ class ActionHandlers:
                 "binding_kind must be one of {}.".format(", ".join(sorted(SUPPORTED_PIPELINE_BINDING_KINDS))),
                 {"binding_kind": normalized_binding_kind},
             )
-        if normalized_cursor is not None and normalized_cursor < 0:
-            raise ReplayFailureError("cursor must be greater than or equal to 0.", {"cursor": normalized_cursor})
-        if normalized_limit is not None and (normalized_limit <= 0 or normalized_limit > MAX_PAGE_LIMIT):
-            raise ReplayFailureError(
-                "limit must be between 1 and {}.".format(MAX_PAGE_LIMIT),
-                {"limit": normalized_limit},
-            )
+        self.context.normalizer.validate_pagination(normalized_cursor, normalized_limit, MAX_PAGE_LIMIT)
 
         params: dict[str, Any] = {
             "event_id": normalized_event_id,
