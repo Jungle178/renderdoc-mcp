@@ -335,6 +335,45 @@ class DummyBridge:
                 "recommended_calls": [{"tool": "renderdoc_get_pixel_history", "arguments": {"texture_id": payload["texture_id"]}}],
                 "meta": {},
             }
+        if method == "probe_texture_regions":
+            return {
+                "texture": {"resource_id": payload["texture_id"], "name": "SceneColor"},
+                "query": {
+                    "texture_id": payload["texture_id"],
+                    "x": payload["x"],
+                    "y": payload["y"],
+                    "width": payload.get("width", 4),
+                    "height": payload.get("height", 4),
+                    "mip_level": payload["mip_level"],
+                    "array_slice": payload["array_slice"],
+                    "sample": payload["sample"],
+                    "channel_mode": payload["channel_mode"],
+                    "threshold": payload["threshold"],
+                },
+                "summary": {
+                    "scanned_pixel_count": 16,
+                    "active_pixel_count": 4,
+                    "active_coverage_ratio": 0.25,
+                    "threshold_mode": payload["channel_mode"],
+                },
+                "regions": [
+                    {
+                        "region_index": 0,
+                        "pixel_count": 4,
+                        "bbox": {"min_x": 1, "min_y": 1, "max_x": 2, "max_y": 2},
+                        "coverage_ratio": 0.25,
+                        "centroid": {"x": 1.5, "y": 1.5},
+                        "representative_pixel": {"x": 1, "y": 1},
+                        "candidate_pixels": [{"x": 1, "y": 1}, {"x": 2, "y": 2}],
+                        "sampled_peak_value": 1.0,
+                    }
+                ],
+                "recommended_pixels": [{"x": 1, "y": 1}],
+                "recommended_calls": [
+                    {"tool": "renderdoc_trace_bad_pixel", "arguments": {"texture_id": payload["texture_id"], "x": 1, "y": 1}}
+                ],
+                "meta": {},
+            }
         if method == "start_pixel_shader_debug":
             return {
                 "shader_debug_id": "debug-1",
@@ -481,6 +520,27 @@ def test_validation_errors_raise_domain_exceptions(tmp_path: Path) -> None:
         application.actions.renderdoc_list_pipeline_bindings(opened["capture_id"], event_id=7, binding_kind="bogus")
 
 
+def test_pipeline_binding_aliases_normalize_before_forwarding(tmp_path: Path) -> None:
+    application, created = _application()
+    capture_path = _capture(tmp_path)
+    opened = application.captures.renderdoc_open_capture(capture_path)
+
+    outputs = application.actions.renderdoc_list_pipeline_bindings(opened["capture_id"], event_id=7, binding_kind=" outputs ")
+    descriptors = application.actions.renderdoc_list_pipeline_bindings(
+        opened["capture_id"], event_id=7, binding_kind="descriptors"
+    )
+    api = application.actions.renderdoc_list_pipeline_bindings(opened["capture_id"], event_id=7, binding_kind="api")
+
+    assert outputs["binding_kind"] == "output_targets"
+    assert descriptors["binding_kind"] == "descriptor_accesses"
+    assert api["binding_kind"] == "api_details"
+    assert created[0].calls[-3:] == [
+        ("list_pipeline_bindings", {"event_id": 7, "binding_kind": "output_targets", "limit": 50}),
+        ("list_pipeline_bindings", {"event_id": 7, "binding_kind": "descriptor_accesses", "limit": 50}),
+        ("list_pipeline_bindings", {"event_id": 7, "binding_kind": "api_details", "limit": 50}),
+    ]
+
+
 def test_resource_usage_handlers_forward_and_attach_meta(tmp_path: Path) -> None:
     application, created = _application()
     capture_path = _capture(tmp_path)
@@ -553,6 +613,50 @@ def test_trace_bad_pixel_handler_normalizes_and_forwards_arguments(tmp_path: Pat
     )
 
 
+def test_probe_texture_regions_handler_normalizes_and_forwards_arguments(tmp_path: Path) -> None:
+    application, created = _application()
+    capture_path = _capture(tmp_path)
+    opened = application.captures.renderdoc_open_capture(capture_path)
+
+    probed = application.resources.renderdoc_probe_texture_regions(
+        opened["capture_id"],
+        " ResourceId::123 ",
+        x="3",
+        y="4",
+        width="8",
+        height="9",
+        mip_level="1",
+        array_slice="2",
+        sample="0",
+        channel_mode=" alpha ",
+        threshold="0.25",
+        min_region_pixels="6",
+        max_regions="4",
+        max_candidate_pixels_per_region="3",
+    )
+
+    assert probed["regions"][0]["bbox"] == {"min_x": 1, "min_y": 1, "max_x": 2, "max_y": 2}
+    assert probed["recommended_pixels"][0] == {"x": 1, "y": 1}
+    assert created[0].calls[-1] == (
+        "probe_texture_regions",
+        {
+            "texture_id": "ResourceId::123",
+            "x": 3,
+            "y": 4,
+            "width": 8,
+            "height": 9,
+            "mip_level": 1,
+            "array_slice": 2,
+            "sample": 0,
+            "channel_mode": "alpha",
+            "threshold": 0.25,
+            "min_region_pixels": 6,
+            "max_regions": 4,
+            "max_candidate_pixels_per_region": 3,
+        },
+    )
+
+
 def test_shader_debug_handlers_normalize_and_forward_arguments(tmp_path: Path) -> None:
     application, created = _application()
     capture_path = _capture(tmp_path)
@@ -620,6 +724,7 @@ def test_registry_contains_new_breaking_api_surface() -> None:
         "renderdoc_get_pipeline_overview",
         "renderdoc_get_shader_code_chunk",
         "renderdoc_list_resource_usages",
+        "renderdoc_probe_texture_regions",
         "renderdoc_trace_bad_pixel",
         "renderdoc_start_pixel_shader_debug",
         "renderdoc_continue_shader_debug",

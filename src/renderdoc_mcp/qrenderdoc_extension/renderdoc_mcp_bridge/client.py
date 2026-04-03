@@ -1,4 +1,5 @@
 import base64
+from collections import deque
 import json
 import os
 import threading
@@ -37,7 +38,6 @@ from .serialization import (
     _api_name,
     _count_actions,
     _enum_name,
-    _float_vector,
     _resource_id,
     _serialize_action,
     _serialize_action_analysis_node,
@@ -56,6 +56,10 @@ from .transport import _WinSockClient, _log
 
 PROTOCOL_VERSION = 1
 CONNECT_RETRY_SECONDS = 20.0
+PROBE_DEFAULT_THRESHOLD = 0.05
+PROBE_MAX_DIMENSION = 128
+PROBE_MAX_PIXELS = 16384
+PROBE_SUPPORTED_CHANNEL_MODES = {"luma", "max_rgb", "alpha", "any"}
 
 _bridge = None
 _METHOD_UNAVAILABLE = object()
@@ -235,6 +239,71 @@ def _serialize_pixel_value(value):
             return _safe_float(getattr(value, attr))
 
     return str(value)
+
+
+def _serialize_sampled_pixel(value):
+    serialized = _serialize_pixel_value(value)
+    if serialized is None:
+        return [0.0, 0.0, 0.0, 0.0]
+
+    if isinstance(serialized, (int, float)):
+        return [float(serialized), 0.0, 0.0, 0.0]
+
+    components = [_safe_float(item) for item in list(serialized)[:4]]
+    while len(components) < 4:
+        components.append(0.0)
+    return components[:4]
+
+
+def _probe_pixel_activity(pixel, channel_mode):
+    values = list(pixel or [])
+    while len(values) < 4:
+        values.append(0.0)
+    r = max(0.0, _safe_float(values[0]))
+    g = max(0.0, _safe_float(values[1]))
+    b = max(0.0, _safe_float(values[2]))
+    a = max(0.0, _safe_float(values[3]))
+
+    if channel_mode == "alpha":
+        return a
+    if channel_mode == "max_rgb":
+        return max(r, g, b)
+    if channel_mode == "any":
+        return max(r, g, b, a)
+    return (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+
+
+def _probe_point_payload(point):
+    return {"x": int(point["x"]), "y": int(point["y"])}
+
+
+def _dedupe_probe_points(points, limit):
+    unique = []
+    seen = set()
+    for point in points:
+        if point is None:
+            continue
+        key = (int(point["x"]), int(point["y"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(point)
+        if len(unique) >= int(limit):
+            break
+    return unique
+
+
+def _snap_probe_point(points, target_x, target_y):
+    if not points:
+        return None
+    return min(
+        points,
+        key=lambda point: (
+            ((float(point["x"]) - float(target_x)) ** 2) + ((float(point["y"]) - float(target_y)) ** 2),
+            int(point["y"]),
+            int(point["x"]),
+        ),
+    )
 
 
 def _shader_debug_no_preference():
@@ -444,6 +513,7 @@ class BridgeClient(object):
         self._get_pixel_history = self.resource_ops._get_pixel_history
         self._debug_pixel = self.resource_ops._debug_pixel
         self._trace_bad_pixel = self.resource_ops._trace_bad_pixel
+        self._probe_texture_regions = self.resource_ops._probe_texture_regions
         self._get_texture_data = self.resource_ops._get_texture_data
         self._get_buffer_data = self.resource_ops._get_buffer_data
         self._save_texture_to_file = self.resource_ops._save_texture_to_file
@@ -866,6 +936,7 @@ class BridgeClient(object):
             return [
                 {"tool": "renderdoc_list_resource_usages", "arguments": {"resource_id": item["resource_id"]}},
                 {"tool": "renderdoc_get_texture_data", "arguments": {"texture_id": item["resource_id"]}},
+                {"tool": "renderdoc_probe_texture_regions", "arguments": {"texture_id": item["resource_id"]}},
                 {"tool": "renderdoc_get_pixel_history", "arguments": {"texture_id": item["resource_id"], "x": 0, "y": 0}},
                 {"tool": "renderdoc_debug_pixel", "arguments": {"texture_id": item["resource_id"], "x": 0, "y": 0}},
                 {"tool": "renderdoc_save_texture_to_file", "arguments": {"texture_id": item["resource_id"]}},
@@ -2592,6 +2663,20 @@ class BridgeClient(object):
         recommended_calls = [
             {"tool": "renderdoc_get_pixel_history", "arguments": dict(pixel_call_arguments)}
         ]
+        if latest_attempt is None:
+            recommended_calls.append(
+                {
+                    "tool": "renderdoc_probe_texture_regions",
+                    "arguments": {
+                        "texture_id": str(texture_id),
+                        "x": int(x),
+                        "y": int(y),
+                        "mip_level": int(mip_level),
+                        "array_slice": int(array_slice),
+                        "sample": int(sample),
+                    },
+                }
+            )
         if primary_event_id is not None:
             recommended_calls.append(
                 {"tool": "renderdoc_get_action_summary", "arguments": {"event_id": int(primary_event_id)}}
@@ -2637,6 +2722,284 @@ class BridgeClient(object):
             "meta": {"auto_shader_debug_attempted": bool(shader_debug.get("attempted", False))},
         }
 
+    def _resolve_probe_dimensions(self, mip_width, mip_height, x, y, width, height):
+        resolved_width = int(width) if width is not None else min(max(1, int(mip_width) - int(x)), PROBE_MAX_DIMENSION)
+        resolved_height = int(height) if height is not None else min(max(1, int(mip_height) - int(y)), PROBE_MAX_DIMENSION)
+
+        if resolved_width <= 0 or resolved_height <= 0:
+            raise BridgeError(
+                "invalid_texture_region",
+                "The requested texture probe region must have positive width and height.",
+                {"x": int(x), "y": int(y), "width": resolved_width, "height": resolved_height},
+            )
+        if resolved_width > PROBE_MAX_DIMENSION or resolved_height > PROBE_MAX_DIMENSION:
+            raise BridgeError(
+                "invalid_texture_region",
+                "The requested texture probe region exceeds the maximum supported dimensions.",
+                {
+                    "width": resolved_width,
+                    "height": resolved_height,
+                    "max_dimension": PROBE_MAX_DIMENSION,
+                },
+            )
+        if resolved_width * resolved_height > PROBE_MAX_PIXELS:
+            raise BridgeError(
+                "invalid_texture_region",
+                "The requested texture probe region exceeds the maximum supported pixel count.",
+                {
+                    "width": resolved_width,
+                    "height": resolved_height,
+                    "max_pixels": PROBE_MAX_PIXELS,
+                },
+            )
+
+        return resolved_width, resolved_height
+
+    def _probe_texture_pixel_grid(self, texture_id, mip_level, array_slice, sample, x, y, width, height):
+        self._ensure_capture_loaded()
+        self._ensure_final_event()
+        response = {
+            "query": {
+                "texture_id": str(texture_id),
+                "x": int(x),
+                "y": int(y),
+                "mip_level": int(mip_level),
+                "array_slice": int(array_slice),
+                "sample": int(sample),
+            }
+        }
+
+        def callback(controller):
+            texture = self._find_texture_by_id(texture_id)
+            base_validation = self._validate_texture_request(texture, mip_level, array_slice, sample, x=x, y=y)
+            resolved_width, resolved_height = self._resolve_probe_dimensions(
+                base_validation["mip_width"],
+                base_validation["mip_height"],
+                x,
+                y,
+                width,
+                height,
+            )
+            validation = self._validate_texture_request(
+                texture,
+                mip_level,
+                array_slice,
+                sample,
+                x=x,
+                y=y,
+                width=resolved_width,
+                height=resolved_height,
+            )
+            comp_type = self._default_comp_type(texture)
+            subresource = _subresource(mip_level, array_slice, sample)
+            pixels = []
+            for row_index in range(int(resolved_height)):
+                row = []
+                for column_index in range(int(resolved_width)):
+                    pixel = controller.PickPixel(
+                        texture.resourceId,
+                        int(x) + column_index,
+                        int(y) + row_index,
+                        subresource,
+                        comp_type,
+                    )
+                    row.append(_serialize_sampled_pixel(pixel))
+                pixels.append(row)
+
+            response["texture"] = _serialize_texture(self.ctx, texture)
+            response["query"]["width"] = int(resolved_width)
+            response["query"]["height"] = int(resolved_height)
+            response["query"]["mip_dimensions"] = {
+                "width": validation["mip_width"],
+                "height": validation["mip_height"],
+                "depth": validation["mip_depth"],
+            }
+            response["pixels"] = pixels
+
+        self._block_invoke_checked(callback)
+        return response
+
+    def _probe_texture_regions(
+        self,
+        texture_id,
+        x,
+        y,
+        width,
+        height,
+        mip_level,
+        array_slice,
+        sample,
+        channel_mode,
+        threshold,
+        min_region_pixels,
+        max_regions,
+        max_candidate_pixels_per_region,
+    ):
+        normalized_channel_mode = str(channel_mode or "luma").strip().lower()
+        if normalized_channel_mode not in PROBE_SUPPORTED_CHANNEL_MODES:
+            raise BridgeError(
+                "invalid_probe_channel_mode",
+                "channel_mode must be one of alpha, any, luma, or max_rgb.",
+                {"channel_mode": str(channel_mode or "")},
+            )
+
+        normalized_threshold = max(0.0, _safe_float(threshold if threshold is not None else PROBE_DEFAULT_THRESHOLD))
+        normalized_min_region_pixels = max(1, _safe_int(min_region_pixels, 4))
+        normalized_max_regions = max(1, _safe_int(max_regions, 10))
+        normalized_max_candidate_pixels = max(1, _safe_int(max_candidate_pixels_per_region, 5))
+
+        payload = self._probe_texture_pixel_grid(texture_id, mip_level, array_slice, sample, x, y, width, height)
+        pixels = list(payload.get("pixels") or [])
+        scanned_height = len(pixels)
+        scanned_width = len(pixels[0]) if pixels else 0
+        origin_x = int((payload.get("query") or {}).get("x", x))
+        origin_y = int((payload.get("query") or {}).get("y", y))
+        scanned_pixel_count = scanned_width * scanned_height
+
+        activity_grid = [
+            [_probe_pixel_activity(pixel, normalized_channel_mode) for pixel in row]
+            for row in pixels
+        ]
+        active_pixel_count = sum(
+            1
+            for row in activity_grid
+            for value in row
+            if value >= normalized_threshold
+        )
+        visited = [[False for _ in range(scanned_width)] for _ in range(scanned_height)]
+        raw_regions = []
+
+        for row_index in range(scanned_height):
+            for column_index in range(scanned_width):
+                if visited[row_index][column_index]:
+                    continue
+                visited[row_index][column_index] = True
+                if activity_grid[row_index][column_index] < normalized_threshold:
+                    continue
+
+                queue = deque([(column_index, row_index)])
+                region_points = []
+                min_x = origin_x + column_index
+                max_x = min_x
+                min_y = origin_y + row_index
+                max_y = min_y
+                total_x = 0.0
+                total_y = 0.0
+                peak_value = -1.0
+
+                while queue:
+                    current_x, current_y = queue.popleft()
+                    activity_value = activity_grid[current_y][current_x]
+                    absolute_x = origin_x + current_x
+                    absolute_y = origin_y + current_y
+                    point = {"x": absolute_x, "y": absolute_y, "activity": activity_value}
+                    region_points.append(point)
+                    total_x += float(absolute_x)
+                    total_y += float(absolute_y)
+                    peak_value = max(peak_value, activity_value)
+                    min_x = min(min_x, absolute_x)
+                    max_x = max(max_x, absolute_x)
+                    min_y = min(min_y, absolute_y)
+                    max_y = max(max_y, absolute_y)
+
+                    for neighbor_x, neighbor_y in (
+                        (current_x + 1, current_y),
+                        (current_x - 1, current_y),
+                        (current_x, current_y + 1),
+                        (current_x, current_y - 1),
+                    ):
+                        if not (0 <= neighbor_x < scanned_width and 0 <= neighbor_y < scanned_height):
+                            continue
+                        if visited[neighbor_y][neighbor_x]:
+                            continue
+                        visited[neighbor_y][neighbor_x] = True
+                        if activity_grid[neighbor_y][neighbor_x] < normalized_threshold:
+                            continue
+                        queue.append((neighbor_x, neighbor_y))
+
+                if len(region_points) < normalized_min_region_pixels:
+                    continue
+
+                sorted_points = sorted(
+                    region_points,
+                    key=lambda point: (-float(point["activity"]), int(point["y"]), int(point["x"])),
+                )
+                centroid_x = total_x / float(len(region_points))
+                centroid_y = total_y / float(len(region_points))
+                peak_point = sorted_points[0]
+                centroid_point = _snap_probe_point(sorted_points, centroid_x, centroid_y)
+                bbox_center_point = _snap_probe_point(
+                    sorted_points,
+                    (float(min_x) + float(max_x)) / 2.0,
+                    (float(min_y) + float(max_y)) / 2.0,
+                )
+                candidate_points = _dedupe_probe_points(
+                    [peak_point, centroid_point, bbox_center_point, *sorted_points],
+                    normalized_max_candidate_pixels,
+                )
+                raw_regions.append(
+                    {
+                        "pixel_count": len(region_points),
+                        "bbox": {"min_x": int(min_x), "min_y": int(min_y), "max_x": int(max_x), "max_y": int(max_y)},
+                        "coverage_ratio": float(len(region_points)) / float(scanned_pixel_count or 1),
+                        "centroid": {"x": centroid_x, "y": centroid_y},
+                        "representative_pixel": _probe_point_payload(candidate_points[0]),
+                        "candidate_pixels": [_probe_point_payload(point) for point in candidate_points],
+                        "sampled_peak_value": float(peak_value),
+                        "_sort_key": (-len(region_points), -float(peak_value), int(min_y), int(min_x)),
+                    }
+                )
+
+        raw_regions.sort(key=lambda region: region["_sort_key"])
+        regions = []
+        recommended_points = []
+        for region_index, region in enumerate(raw_regions[:normalized_max_regions]):
+            region_payload = dict(region)
+            region_payload.pop("_sort_key", None)
+            region_payload["region_index"] = region_index
+            regions.append(region_payload)
+            recommended_points.extend(region_payload.get("candidate_pixels", [])[:1])
+
+        recommended_pixels = [
+            _probe_point_payload(point)
+            for point in _dedupe_probe_points(recommended_points, normalized_max_regions)
+        ]
+        pixel_call_base = {
+            "texture_id": str(texture_id),
+            "mip_level": int(mip_level),
+            "array_slice": int(array_slice),
+            "sample": int(sample),
+        }
+        recommended_calls = [
+            {
+                "tool": "renderdoc_trace_bad_pixel",
+                "arguments": {
+                    **pixel_call_base,
+                    "x": int(point["x"]),
+                    "y": int(point["y"]),
+                },
+            }
+            for point in recommended_pixels
+        ]
+
+        query = dict(payload.get("query") or {})
+        query["channel_mode"] = normalized_channel_mode
+        query["threshold"] = float(normalized_threshold)
+
+        return {
+            "texture": dict(payload.get("texture") or {}),
+            "query": query,
+            "summary": {
+                "scanned_pixel_count": int(scanned_pixel_count),
+                "active_pixel_count": int(active_pixel_count),
+                "active_coverage_ratio": float(active_pixel_count) / float(scanned_pixel_count or 1),
+                "threshold_mode": normalized_channel_mode,
+            },
+            "regions": regions,
+            "recommended_pixels": recommended_pixels,
+            "recommended_calls": recommended_calls,
+        }
+
     def _get_texture_data(self, texture_id, mip_level, x, y, width, height, array_slice, sample):
         self._ensure_capture_loaded()
         self._ensure_final_event()
@@ -2663,7 +3026,7 @@ class BridgeClient(object):
                 row = []
                 for column_index in range(int(width)):
                     pixel = controller.PickPixel(texture.resourceId, int(x) + column_index, int(y) + row_index, subresource, comp_type)
-                    row.append(_float_vector(pixel))
+                    row.append(_serialize_sampled_pixel(pixel))
                 pixels.append(row)
             response["texture"] = _serialize_texture(self.ctx, texture)
             response["query"]["mip_dimensions"] = {

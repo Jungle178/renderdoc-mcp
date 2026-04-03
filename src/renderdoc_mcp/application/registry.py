@@ -138,6 +138,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         lambda application: application.resources.renderdoc_trace_bad_pixel,
     ),
     ToolSpec(
+        "renderdoc_probe_texture_regions",
+        "Scan a bounded texture region, detect active connected regions, and suggest candidate pixels for correctness investigations.",
+        "probe_texture_regions",
+        lambda application: application.resources.renderdoc_probe_texture_regions,
+    ),
+    ToolSpec(
         "renderdoc_start_pixel_shader_debug",
         "Start a pixel shader debugging session for a draw event and pixel co-ordinate.",
         "start_pixel_shader_debug",

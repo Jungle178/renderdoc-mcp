@@ -42,6 +42,13 @@ SUPPORTED_PIPELINE_BINDING_KINDS = {
     "shaders",
     "api_details",
 }
+PIPELINE_BINDING_KIND_ALIASES = {
+    "output": "output_targets",
+    "outputs": "output_targets",
+    "descriptor": "descriptor_accesses",
+    "descriptors": "descriptor_accesses",
+    "api": "api_details",
+}
 DEFAULT_PIPELINE_BINDING_LIMIT = 50
 DEFAULT_SHADER_LINE_COUNT = 200
 MAX_SHADER_LINE_COUNT = 1000
@@ -52,6 +59,11 @@ def _normalize_shader_stage(stage: str | None) -> str | None:
         return None
     key = stage.strip().replace("_", "").replace("-", "").replace(" ", "").lower()
     return SUPPORTED_SHADER_STAGES.get(key)
+
+
+def _normalize_binding_kind(binding_kind: str) -> str:
+    key = binding_kind.strip().replace("-", "_").replace(" ", "_").lower()
+    return PIPELINE_BINDING_KIND_ALIASES.get(key, key)
 
 
 class ActionHandlers:
@@ -125,7 +137,9 @@ class ActionHandlers:
         limit: int | str | None = None,
     ) -> dict[str, Any]:
         normalized_event_id = self.context.normalize_required_int(event_id, "event_id")
-        normalized_binding_kind = (self.context.normalize_required_string(binding_kind, "binding_kind")).lower()
+        normalized_binding_kind = _normalize_binding_kind(
+            self.context.normalize_required_string(binding_kind, "binding_kind")
+        )
         normalized_cursor = self.context.normalize_optional_int(cursor, "cursor")
         normalized_limit = self.context.normalize_optional_int(limit, "limit")
 

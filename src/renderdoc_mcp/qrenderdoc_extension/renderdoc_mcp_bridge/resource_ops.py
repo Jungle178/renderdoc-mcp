@@ -44,6 +44,21 @@ class ResourceOps(BridgeComponent):
                 int(params.get("array_slice", 0)),
                 int(params.get("sample", 0)),
             ),
+            "probe_texture_regions": lambda params: self._probe_texture_regions(
+                params.get("texture_id", ""),
+                int(params.get("x", 0)),
+                int(params.get("y", 0)),
+                params.get("width"),
+                params.get("height"),
+                int(params.get("mip_level", 0)),
+                int(params.get("array_slice", 0)),
+                int(params.get("sample", 0)),
+                params.get("channel_mode", "luma"),
+                params.get("threshold", 0.05),
+                params.get("min_region_pixels", 4),
+                params.get("max_regions", 10),
+                params.get("max_candidate_pixels_per_region", 5),
+            ),
             "get_texture_data": lambda params: self._get_texture_data(
                 params.get("texture_id", ""),
                 int(params.get("mip_level", 0)),
@@ -76,6 +91,39 @@ class ResourceOps(BridgeComponent):
 
     def _trace_bad_pixel(self, texture_id, x, y, mip_level, array_slice, sample):
         return self._call_bridge_client("_trace_bad_pixel", texture_id, x, y, mip_level, array_slice, sample)
+
+    def _probe_texture_regions(
+        self,
+        texture_id,
+        x,
+        y,
+        width,
+        height,
+        mip_level,
+        array_slice,
+        sample,
+        channel_mode,
+        threshold,
+        min_region_pixels,
+        max_regions,
+        max_candidate_pixels_per_region,
+    ):
+        return self._call_bridge_client(
+            "_probe_texture_regions",
+            texture_id,
+            x,
+            y,
+            width,
+            height,
+            mip_level,
+            array_slice,
+            sample,
+            channel_mode,
+            threshold,
+            min_region_pixels,
+            max_regions,
+            max_candidate_pixels_per_region,
+        )
 
     def _get_texture_data(self, texture_id, mip_level, x, y, width, height, array_slice, sample):
         return self._call_bridge_client("_get_texture_data", texture_id, mip_level, x, y, width, height, array_slice, sample)

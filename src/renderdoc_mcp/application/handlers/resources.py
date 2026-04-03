@@ -13,12 +13,21 @@ SUPPORTED_RESOURCE_KINDS = {"all", "textures", "buffers"}
 SUPPORTED_RESOURCE_USAGE_KINDS = {"all", *RESOURCE_USAGE_KINDS}
 SUPPORTED_RESOURCE_SORT_OPTIONS = {"name", "size"}
 SUPPORTED_BUFFER_ENCODINGS = {"hex", "base64"}
+SUPPORTED_TEXTURE_PROBE_CHANNEL_MODES = {"luma", "max_rgb", "alpha", "any"}
 DEFAULT_RESOURCE_PAGE_LIMIT = 50
 DEFAULT_PIXEL_HISTORY_LIMIT = 100
 DEFAULT_BUFFER_READ_SIZE = 256
 MAX_BUFFER_READ_SIZE = 4096
 MAX_TEXTURE_PREVIEW_DIMENSION = 64
 MAX_TEXTURE_PREVIEW_PIXELS = 1024
+MAX_TEXTURE_PROBE_DIMENSION = 128
+MAX_TEXTURE_PROBE_PIXELS = 16384
+DEFAULT_TEXTURE_PROBE_THRESHOLD = 0.05
+DEFAULT_TEXTURE_PROBE_MIN_REGION_PIXELS = 4
+DEFAULT_TEXTURE_PROBE_MAX_REGIONS = 10
+DEFAULT_TEXTURE_PROBE_MAX_CANDIDATE_PIXELS = 5
+MAX_TEXTURE_PROBE_MAX_REGIONS = 32
+MAX_TEXTURE_PROBE_MAX_CANDIDATE_PIXELS = 16
 DEFAULT_SHADER_DEBUG_STATE_LIMIT = 32
 MAX_SHADER_DEBUG_STATE_LIMIT = 128
 DEFAULT_SHADER_DEBUG_CHANGE_LIMIT = 64
@@ -164,6 +173,106 @@ class ResourceHandlers:
     ) -> dict[str, Any]:
         params = self._normalize_pixel_params(texture_id, x, y, mip_level, array_slice, sample)
         session, result = self.context.capture_tool(capture_id, "trace_bad_pixel", params)
+        return attach_capture(ensure_meta(result), session)
+
+    def renderdoc_probe_texture_regions(
+        self,
+        capture_id: str,
+        texture_id: str,
+        x: int | str | None = 0,
+        y: int | str | None = 0,
+        width: int | str | None = None,
+        height: int | str | None = None,
+        mip_level: int | str | None = 0,
+        array_slice: int | str | None = 0,
+        sample: int | str | None = 0,
+        channel_mode: str | None = "luma",
+        threshold: float | str | None = None,
+        min_region_pixels: int | str | None = None,
+        max_regions: int | str | None = None,
+        max_candidate_pixels_per_region: int | str | None = None,
+    ) -> dict[str, Any]:
+        normalized_channel_mode = (self.context.normalize_optional_string(channel_mode) or "luma").lower()
+        normalized_threshold = self.context.normalize_optional_float(threshold, "threshold")
+        normalized_width = self.context.normalize_optional_int(width, "width")
+        normalized_height = self.context.normalize_optional_int(height, "height")
+        normalized_min_region_pixels = self.context.normalize_optional_int(min_region_pixels, "min_region_pixels")
+        normalized_max_regions = self.context.normalize_optional_int(max_regions, "max_regions")
+        normalized_max_candidate_pixels = self.context.normalize_optional_int(
+            max_candidate_pixels_per_region,
+            "max_candidate_pixels_per_region",
+        )
+
+        if normalized_channel_mode not in SUPPORTED_TEXTURE_PROBE_CHANNEL_MODES:
+            raise ReplayFailureError(
+                "channel_mode must be one of alpha, any, luma, or max_rgb.",
+                {"channel_mode": normalized_channel_mode},
+            )
+        if normalized_threshold is not None and (normalized_threshold < 0.0 or normalized_threshold > 1.0):
+            raise ReplayFailureError(
+                "threshold must be between 0.0 and 1.0.",
+                {"threshold": normalized_threshold},
+            )
+        if normalized_width is not None and (
+            normalized_width <= 0 or normalized_width > MAX_TEXTURE_PROBE_DIMENSION
+        ):
+            raise ReplayFailureError(
+                "width must be between 1 and {}.".format(MAX_TEXTURE_PROBE_DIMENSION),
+                {"width": normalized_width},
+            )
+        if normalized_height is not None and (
+            normalized_height <= 0 or normalized_height > MAX_TEXTURE_PROBE_DIMENSION
+        ):
+            raise ReplayFailureError(
+                "height must be between 1 and {}.".format(MAX_TEXTURE_PROBE_DIMENSION),
+                {"height": normalized_height},
+            )
+        if normalized_width is not None and normalized_height is not None:
+            if normalized_width * normalized_height > MAX_TEXTURE_PROBE_PIXELS:
+                raise ReplayFailureError(
+                    "width * height must be less than or equal to {}.".format(MAX_TEXTURE_PROBE_PIXELS),
+                    {"width": normalized_width, "height": normalized_height},
+                )
+        if normalized_min_region_pixels is not None and normalized_min_region_pixels <= 0:
+            raise ReplayFailureError(
+                "min_region_pixels must be greater than 0.",
+                {"min_region_pixels": normalized_min_region_pixels},
+            )
+        if normalized_max_regions is not None and (
+            normalized_max_regions <= 0 or normalized_max_regions > MAX_TEXTURE_PROBE_MAX_REGIONS
+        ):
+            raise ReplayFailureError(
+                "max_regions must be between 1 and {}.".format(MAX_TEXTURE_PROBE_MAX_REGIONS),
+                {"max_regions": normalized_max_regions},
+            )
+        if normalized_max_candidate_pixels is not None and (
+            normalized_max_candidate_pixels <= 0
+            or normalized_max_candidate_pixels > MAX_TEXTURE_PROBE_MAX_CANDIDATE_PIXELS
+        ):
+            raise ReplayFailureError(
+                "max_candidate_pixels_per_region must be between 1 and {}.".format(
+                    MAX_TEXTURE_PROBE_MAX_CANDIDATE_PIXELS
+                ),
+                {"max_candidate_pixels_per_region": normalized_max_candidate_pixels},
+            )
+
+        params = self._normalize_pixel_params(texture_id, x, y, mip_level, array_slice, sample)
+        params.update(
+            {
+                "channel_mode": normalized_channel_mode,
+                "threshold": normalized_threshold if normalized_threshold is not None else DEFAULT_TEXTURE_PROBE_THRESHOLD,
+                "min_region_pixels": normalized_min_region_pixels or DEFAULT_TEXTURE_PROBE_MIN_REGION_PIXELS,
+                "max_regions": normalized_max_regions or DEFAULT_TEXTURE_PROBE_MAX_REGIONS,
+                "max_candidate_pixels_per_region": normalized_max_candidate_pixels
+                or DEFAULT_TEXTURE_PROBE_MAX_CANDIDATE_PIXELS,
+            }
+        )
+        if normalized_width is not None:
+            params["width"] = normalized_width
+        if normalized_height is not None:
+            params["height"] = normalized_height
+
+        session, result = self.context.capture_tool(capture_id, "probe_texture_regions", params)
         return attach_capture(ensure_meta(result), session)
 
     def renderdoc_start_pixel_shader_debug(

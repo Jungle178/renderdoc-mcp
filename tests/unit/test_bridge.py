@@ -341,6 +341,167 @@ def test_bridge_client_pipeline_bindings_degrades_when_accessor_signature_change
     assert "compatible D3D12 pipeline accessor" in response["items"][0]["reason"]
 
 
+def test_bridge_client_texture_recommendations_include_probe_tool() -> None:
+    client = BridgeClient(FakeContext(FakeController()))
+
+    recommendations = client._resource_recommendations({"kind": "texture", "resource_id": "tex-1"})
+
+    assert any(item["tool"] == "renderdoc_probe_texture_regions" for item in recommendations)
+
+
+def test_bridge_client_probe_texture_regions_detects_single_active_block(monkeypatch) -> None:
+    client = BridgeClient(FakeContext(FakeController()))
+    captured = {}
+    monkeypatch.setattr(client, "_ensure_capture_loaded", lambda: None)
+    monkeypatch.setattr(
+        client,
+        "_probe_texture_pixel_grid",
+        lambda texture_id, mip_level, array_slice, sample, x, y, width, height: captured.update(
+            {
+                "texture_id": texture_id,
+                "mip_level": mip_level,
+                "array_slice": array_slice,
+                "sample": sample,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+            }
+        )
+        or {
+            "texture": {"resource_id": texture_id, "name": "SceneColor"},
+            "query": {
+                "texture_id": texture_id,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+                "mip_level": mip_level,
+                "array_slice": array_slice,
+                "sample": sample,
+            },
+            "pixels": [
+                [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
+                [[0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]],
+                [[0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]],
+                [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
+            ],
+        },
+        raising=False,
+    )
+
+    response = client._probe_texture_regions("tex-1", 5, 6, 7, 8, 1, 2, 3, "any", 0.5, 1, 10, 3)
+
+    assert response["summary"]["active_pixel_count"] == 4
+    assert response["summary"]["scanned_pixel_count"] == 16
+    assert response["regions"][0]["pixel_count"] == 4
+    assert response["regions"][0]["bbox"] == {"min_x": 6, "min_y": 7, "max_x": 7, "max_y": 8}
+    assert response["regions"][0]["representative_pixel"] == {"x": 6, "y": 7}
+    assert response["recommended_pixels"][0] == {"x": 6, "y": 7}
+    assert response["recommended_calls"][0]["tool"] == "renderdoc_trace_bad_pixel"
+    assert captured == {
+        "texture_id": "tex-1",
+        "mip_level": 1,
+        "array_slice": 2,
+        "sample": 3,
+        "x": 5,
+        "y": 6,
+        "width": 7,
+        "height": 8,
+    }
+
+
+def test_bridge_client_pixel_modification_preserves_unknown_pixel_value_payloads() -> None:
+    client = BridgeClient(FakeContext(FakeController()))
+    modification = SimpleNamespace(
+        eventId=7,
+        preMod=SimpleNamespace(foo=1),
+        shaderOut=SimpleNamespace(bar=2),
+        postMod=SimpleNamespace(baz=3),
+    )
+
+    response = client._serialize_pixel_modification(modification, object())
+
+    assert response["pre_mod"] == "namespace(foo=1)"
+    assert response["shader_output"] == "namespace(bar=2)"
+    assert response["post_mod"] == "namespace(baz=3)"
+
+
+def test_bridge_client_get_texture_data_serializes_wrapped_pick_pixel_values(monkeypatch) -> None:
+    controller = FakeController()
+    client = BridgeClient(FakeContext(controller))
+    texture = SimpleNamespace(resourceId="tex-1")
+
+    monkeypatch.setattr(client, "_ensure_capture_loaded", lambda: None)
+    monkeypatch.setattr(client, "_ensure_final_event", lambda: None)
+    monkeypatch.setattr(client, "_find_texture_by_id", lambda texture_id: texture)
+    monkeypatch.setattr(
+        client,
+        "_validate_texture_request",
+        lambda texture, mip_level, array_slice, sample, x=None, y=None, width=None, height=None: {
+            "mip_width": 16,
+            "mip_height": 16,
+            "mip_depth": 1,
+        },
+    )
+    monkeypatch.setattr(client, "_default_comp_type", lambda texture: 0)
+    monkeypatch.setattr(bridge_client_module, "_subresource", lambda mip_level, array_slice, sample: object())
+    monkeypatch.setattr(
+        bridge_client_module,
+        "_serialize_texture",
+        lambda ctx, texture: {"resource_id": str(texture.resourceId)},
+    )
+    monkeypatch.setattr(
+        controller,
+        "PickPixel",
+        lambda resource_id, x, y, subresource, comp_type: SimpleNamespace(
+            floatValue=SimpleNamespace(r=1.0, g=0.5, b=0.25, a=1.0)
+        ),
+        raising=False,
+    )
+
+    response = client._get_texture_data("tex-1", 0, 2, 3, 1, 1, 0, 0)
+
+    assert response["pixels"] == [[[1.0, 0.5, 0.25, 1.0]]]
+
+
+def test_bridge_client_probe_texture_pixel_grid_serializes_rgba_pick_pixel_values(monkeypatch) -> None:
+    controller = FakeController()
+    client = BridgeClient(FakeContext(controller))
+    texture = SimpleNamespace(resourceId="tex-1")
+
+    monkeypatch.setattr(client, "_ensure_capture_loaded", lambda: None)
+    monkeypatch.setattr(client, "_ensure_final_event", lambda: None)
+    monkeypatch.setattr(client, "_find_texture_by_id", lambda texture_id: texture)
+    monkeypatch.setattr(
+        client,
+        "_validate_texture_request",
+        lambda texture, mip_level, array_slice, sample, x=None, y=None, width=None, height=None: {
+            "mip_width": 16,
+            "mip_height": 16,
+            "mip_depth": 1,
+        },
+    )
+    monkeypatch.setattr(client, "_resolve_probe_dimensions", lambda mip_width, mip_height, x, y, width, height: (1, 1))
+    monkeypatch.setattr(client, "_default_comp_type", lambda texture: 0)
+    monkeypatch.setattr(bridge_client_module, "_subresource", lambda mip_level, array_slice, sample: object())
+    monkeypatch.setattr(
+        bridge_client_module,
+        "_serialize_texture",
+        lambda ctx, texture: {"resource_id": str(texture.resourceId)},
+    )
+    monkeypatch.setattr(
+        controller,
+        "PickPixel",
+        lambda resource_id, x, y, subresource, comp_type: SimpleNamespace(r=0.1, g=0.2, b=0.3, a=0.4),
+        raising=False,
+    )
+
+    response = client._probe_texture_pixel_grid("tex-1", 0, 0, 0, 5, 6, 1, 1)
+
+    assert response["pixels"] == [[[0.1, 0.2, 0.3, 0.4]]]
+
+
 def test_bridge_client_shader_summary_returns_unavailable_when_disassembly_targets_missing(monkeypatch) -> None:
     client = BridgeClient(FakeContext(FakeController(state=FakeState(shader_bound=True))))
     monkeypatch.setattr(bridge_client_module, "_shader_stage_from_name", lambda stage_name: "Pixel")
@@ -408,6 +569,15 @@ def test_bridge_client_trace_bad_pixel_handles_empty_history(monkeypatch) -> Non
     assert response["related_ids"]["primary_event_id"] is None
     assert response["shader_debug"]["reason"] == "no_final_writer"
     assert response["recommended_calls"][0]["tool"] == "renderdoc_get_pixel_history"
+    probe_call = next(item for item in response["recommended_calls"] if item["tool"] == "renderdoc_probe_texture_regions")
+    assert probe_call["arguments"] == {
+        "texture_id": "tex-1",
+        "x": 4,
+        "y": 5,
+        "mip_level": 0,
+        "array_slice": 0,
+        "sample": 0,
+    }
 
 
 def test_bridge_client_trace_bad_pixel_uses_latest_successful_writer(monkeypatch) -> None:
